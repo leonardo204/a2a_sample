@@ -37,7 +37,9 @@ class AzureLLMClient:
     
     async def chat_completion(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, str]] = None,
+        system_prompt: str = None,
+        user_prompt: str = None,
         temperature: float = 0.7,
         max_tokens: int = 1000,
         response_format: Optional[Dict[str, str]] = None
@@ -46,7 +48,9 @@ class AzureLLMClient:
         Azure OpenAI Chat Completion API 호출
         
         Args:
-            messages: 메시지 리스트 [{"role": "system", "content": "..."}, ...]
+            messages: 메시지 리스트 [{"role": "system", "content": "..."}, ...] (선택사항)
+            system_prompt: 시스템 프롬프트 (선택사항)
+            user_prompt: 사용자 프롬프트 (선택사항)
             temperature: 응답의 창의성 (0.0-1.0)
             max_tokens: 최대 토큰 수
             response_format: 응답 형식 지정 (예: {"type": "json_object"})
@@ -55,9 +59,23 @@ class AzureLLMClient:
             LLM 응답 텍스트
         """
         try:
+            # 메시지 구성 방식 결정
+            if messages is not None:
+                # 기존 방식: messages 직접 전달
+                final_messages = messages
+            elif system_prompt or user_prompt:
+                # 새 방식: system_prompt, user_prompt 분리 전달
+                final_messages = []
+                if system_prompt:
+                    final_messages.append({"role": "system", "content": system_prompt})
+                if user_prompt:
+                    final_messages.append({"role": "user", "content": user_prompt})
+            else:
+                raise ValueError("messages 또는 system_prompt/user_prompt 중 하나는 제공되어야 합니다.")
+            
             kwargs = {
                 "model": self.deployment_name,
-                "messages": messages,
+                "messages": final_messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens
             }

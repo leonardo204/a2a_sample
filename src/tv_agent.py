@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-TV Agent - 메시지 추출 문제 해결 버전
+TV Agent - TV 제어 전담 에이전트
+A2A 프로토콜 기반으로 Main Agent Registry에 자동 등록
 """
 import asyncio
 import uuid
 import json
-import re
+import httpx
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events.event_queue import EventQueue
 from a2a.server.apps import A2AStarletteApplication
@@ -26,42 +27,47 @@ class TVAgentExecutor(AgentExecutor):
     def __init__(self):
         """초기화"""
         print("📺 TVAgentExecutor 초기화...")
-        self.llm_client = LLMClient()
-        self.prompt_loader = PromptLoader("prompt")
-        print("✅ TVAgentExecutor 초기화 완료")
+        try:
+            self.llm_client = LLMClient()
+            self.prompt_loader = PromptLoader("prompt")
+            print("✅ TVAgentExecutor 초기화 완료")
+        except Exception as e:
+            print(f"❌ TVAgentExecutor 초기화 실패: {e}")
+            raise
 
     async def execute(self, context: RequestContext, queue: EventQueue) -> None:
-        """TV 제어 요청 처리"""
+        """메시지 실행 처리"""
+        
         print("\n" + "=" * 50)
         print("📺 TV AGENT 실행 시작")
         print("=" * 50)
         
         try:
-            # 사용자 메시지 추출
+            # 1. 사용자 메시지 추출
             user_text = await self._extract_user_message(context)
             
             if not user_text:
-                print("❌ TV Agent: 메시지 추출 실패")
-                await self._send_response(context, queue, "TV 제어가 필요하시면 명령을 말씀해 주세요.")
+                print("❌ 메시지 추출 실패")
+                await self._send_response(context, queue, "안녕하세요! TV 제어를 도와드릴 수 있습니다.")
                 return
             
-            print(f"✅ TV Agent 메시지: '{user_text}'")
+            print(f"✅ 추출된 메시지: '{user_text}'")
             
-            # TV 제어 응답 생성
-            tv_response = await self._generate_tv_response(user_text)
+            # 2. TV 제어 요청 처리
+            response_text = await self._process_tv_request(user_text)
             
-            # 응답 전송
-            await self._send_response(context, queue, tv_response)
+            # 3. 응답 전송
+            await self._send_response(context, queue, response_text)
             
-            print("✅ TV Agent 처리 완료!")
+            print("✅ TV 제어 처리 완료!")
             
         except Exception as e:
-            print(f"❌ TV Agent 오류: {e}")
-            await self._send_response(context, queue, f"TV 제어 중 오류가 발생했습니다: {str(e)}")
+            print(f"❌ 오류 발생: {e}")
+            await self._send_response(context, queue, f"TV 제어 처리 중 오류가 발생했습니다: {str(e)}")
 
     async def _extract_user_message(self, context: RequestContext) -> str:
-        """사용자 메시지 추출 (Main Agent와 동일한 방식)"""
-        print("🔍 TV Agent 메시지 추출...")
+        """사용자 메시지 추출"""
+        print("🔍 메시지 추출 중...")
         
         try:
             message = getattr(context, 'message', None)
@@ -73,216 +79,206 @@ class TVAgentExecutor(AgentExecutor):
                 return ""
             
             user_text = ""
-            for i, part in enumerate(parts):
-                print(f"  Part {i+1}: {type(part)}")
-                
-                # part.root.text 접근
-                try:
-                    if hasattr(part, 'root'):
-                        root = getattr(part, 'root')
-                        if hasattr(root, 'text'):
-                            text_value = getattr(root, 'text')
-                            print(f"  ✅ TV root.text: '{text_value}'")
-                            if text_value:
-                                user_text += str(text_value)
-                except Exception as e:
-                    print(f"  ❌ TV root.text 접근 실패: {e}")
-                
-                # Pydantic model_dump 방법
-                try:
-                    if hasattr(part, 'model_dump'):
-                        part_dict = part.model_dump()
-                        if 'root' in part_dict and isinstance(part_dict['root'], dict):
-                            if 'text' in part_dict['root']:
-                                text_value = part_dict['root']['text']
-                                print(f"  ✅ TV model_dump text: '{text_value}'")
-                                if text_value:
-                                    user_text += str(text_value)
-                except Exception as e:
-                    print(f"  ❌ TV model_dump 접근 실패: {e}")
-            
-            user_text = user_text.strip()
-            print(f"✅ TV 최종 텍스트: '{user_text}'")
-            return user_text
+            for part in parts:
+                # 텍스트 추출 시도
+                if hasattr(part, 'root') and hasattr(part.root, 'text'):
+                    text_value = getattr(part.root, 'text')
+                    if text_value:
+                        user_text += str(text_value)
+                elif hasattr(part, 'model_dump'):
+                    part_dict = part.model_dump()
+                    if 'root' in part_dict and isinstance(part_dict['root'], dict):
+                        if 'text' in part_dict['root']:
+                            user_text += str(part_dict['root']['text'])
+                            
+            return user_text.strip()
             
         except Exception as e:
-            print(f"❌ TV 메시지 추출 오류: {e}")
+            print(f"❌ 메시지 추출 실패: {e}")
             return ""
 
-    async def _generate_tv_response(self, user_text: str) -> str:
-        """TV 제어 응답 생성"""
-        print(f"📺 TV 응답 생성: '{user_text}'")
+    async def _process_tv_request(self, user_text: str) -> str:
+        """TV 제어 요청 처리 - 단일 책임 원칙에 따라 TV 제어만 수행"""
+        print(f"📺 TV 제어 요청 분석 중: '{user_text}'")
         
         try:
-            # 액션 및 매개변수 추출
-            action, parameters = self._extract_tv_action(user_text)
-            print(f"  액션: {action}, 매개변수: {parameters}")
+            # TV 액션 분석
+            action_info = self._analyze_tv_action(user_text)
             
-            # 현재 TV 상태 (테스트용)
-            current_state = {
-                "power": "on",
-                "channel": 7,
-                "volume": 25,
-                "max_volume": 50
-            }
+            print(f"🎯 분석된 액션: {action_info}")
             
-            # 새로운 상태 계산
-            new_state = self._calculate_new_state(action, parameters, current_state)
-            print(f"  현재 상태: {current_state}")
-            print(f"  새 상태: {new_state}")
+            # TV 제어 실행 (시뮬레이션)
+            result = await self._execute_tv_control(action_info, user_text)
             
-            # LLM을 사용한 응답 생성 시도
-            try:
-                tv_context = {
-                    "original_request": user_text,
-                    "action": action,
-                    "parameters": parameters,
-                    "current_channel": current_state["channel"],
-                    "current_volume": current_state["volume"]
-                }
-                
-                prompt_data = self.prompt_loader.load_prompt("tv_agent", "tv_control")
-                system_prompt = prompt_data.get("system_prompt", "")
-                user_prompt_template = prompt_data.get("user_prompt_template", "{user_input}")
-                
-                user_prompt = user_prompt_template.format(**tv_context)
-                
-                response = await self.llm_client.chat_completion(
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=0.5,
-                    max_tokens=300
-                )
-                
-                # JSON 응답 파싱 시도
-                try:
-                    # ```json 코드 블록 제거
-                    clean_response = response.strip()
-                    if clean_response.startswith("```json"):
-                        clean_response = clean_response[7:]  # ```json 제거
-                    if clean_response.endswith("```"):
-                        clean_response = clean_response[:-3]  # ``` 제거
-                    clean_response = clean_response.strip()
-                    
-                    json_response = json.loads(clean_response)
-                    if isinstance(json_response, dict) and "response" in json_response:
-                        final_response = json_response["response"]
-                        print(f"  ✅ TV LLM JSON 파싱 성공: {final_response}")
-                        return final_response
-                    else:
-                        print(f"  ⚠️ JSON에 response 필드 없음: {json_response}")
-                        return clean_response
-                except json.JSONDecodeError:
-                    print(f"  ⚠️ JSON 파싱 실패, 원문 사용: {response}")
-                    return response
-                    
-            except Exception as e:
-                print(f"  ❌ LLM 호출 실패: {e}")
-            
-            # 대체 응답 생성 (LLM 실패시)
-            fallback_response = self._generate_fallback_response(action, parameters, current_state, new_state)
-            print(f"  ✅ 대체 응답 생성")
-            return fallback_response
+            return result
             
         except Exception as e:
-            print(f"❌ TV 응답 생성 오류: {e}")
-            return f"TV 제어 명령을 적용했습니다! (요청: '{user_text}')"
+            print(f"❌ TV 제어 요청 처리 실패: {e}")
+            return f"죄송합니다. TV 제어 처리 중 오류가 발생했습니다."
 
-    def _extract_tv_action(self, user_text: str) -> tuple[str, dict]:
-        """사용자 입력에서 TV 액션과 매개변수 추출"""
+    def _analyze_tv_action(self, user_text: str) -> dict:
+        """TV 액션 분석"""
         user_lower = user_text.lower()
-        parameters = {}
         
-        # 볼륨 제어
-        if any(keyword in user_lower for keyword in ["볼륨", "음량", "소리"]):
-            if any(keyword in user_lower for keyword in ["올려", "높여", "크게", "up"]):
-                return "volume_up", parameters
-            elif any(keyword in user_lower for keyword in ["내려", "낮춰", "작게", "down"]):
-                return "volume_down", parameters
-            elif any(keyword in user_lower for keyword in ["음소거", "mute"]):
-                return "mute", parameters
-            else:
-                # 숫자 추출
-                numbers = re.findall(r'\d+', user_text)
-                if numbers:
-                    parameters["volume_level"] = int(numbers[0])
-                    return "volume_set", parameters
-                return "volume_up", parameters
-        
-        # 채널 제어
-        elif any(keyword in user_lower for keyword in ["채널", "번", "channel"]):
-            numbers = re.findall(r'\d+', user_text)
-            if numbers:
-                parameters["channel"] = int(numbers[0])
-                return "channel_set", parameters
-            elif any(keyword in user_lower for keyword in ["올려", "다음", "up"]):
-                return "channel_up", parameters
-            elif any(keyword in user_lower for keyword in ["내려", "이전", "down"]):
-                return "channel_down", parameters
-            else:
-                return "channel_up", parameters
+        action_info = {
+            "action_type": "unknown",
+            "parameters": {},
+            "device": "main_tv"
+        }
         
         # 전원 제어
-        elif any(keyword in user_lower for keyword in ["켜", "on", "전원"]):
-            return "power_on", parameters
-        elif any(keyword in user_lower for keyword in ["꺼", "off"]):
-            return "power_off", parameters
+        if any(word in user_lower for word in ["켜", "on", "전원 켜"]):
+            action_info["action_type"] = "power_on"
+        elif any(word in user_lower for word in ["꺼", "off", "전원 꺼"]):
+            action_info["action_type"] = "power_off"
         
-        # 기본값
-        else:
-            return "general_control", parameters
+        # 볼륨 제어
+        elif any(word in user_lower for word in ["볼륨", "volume"]):
+            if any(word in user_lower for word in ["올려", "up", "크게", "키워"]):
+                action_info["action_type"] = "volume_up"
+                # 숫자 추출 시도
+                volume_level = self._extract_volume_level(user_text)
+                if volume_level:
+                    action_info["parameters"]["level"] = volume_level
+            elif any(word in user_lower for word in ["내려", "down", "작게", "줄여"]):
+                action_info["action_type"] = "volume_down"
+                volume_level = self._extract_volume_level(user_text)
+                if volume_level:
+                    action_info["parameters"]["level"] = volume_level
+            else:
+                action_info["action_type"] = "volume_control"
+        
+        # 채널 제어
+        elif any(word in user_lower for word in ["채널", "channel"]):
+            if any(word in user_lower for word in ["바꿔", "변경", "돌려"]):
+                action_info["action_type"] = "channel_change"
+                channel_num = self._extract_channel_number(user_text)
+                if channel_num:
+                    action_info["parameters"]["channel"] = channel_num
+            elif any(word in user_lower for word in ["올려", "다음"]):
+                action_info["action_type"] = "channel_up"
+            elif any(word in user_lower for word in ["내려", "이전"]):
+                action_info["action_type"] = "channel_down"
+        
+        # 입력 소스 변경
+        elif any(word in user_lower for word in ["hdmi", "입력", "소스"]):
+            action_info["action_type"] = "input_change"
+            if "hdmi" in user_lower:
+                hdmi_num = self._extract_hdmi_number(user_text)
+                if hdmi_num:
+                    action_info["parameters"]["input"] = f"HDMI{hdmi_num}"
+        
+        # 음소거
+        elif any(word in user_lower for word in ["음소거", "mute", "조용히"]):
+            action_info["action_type"] = "mute_toggle"
+        
+        return action_info
 
-    def _calculate_new_state(self, action: str, parameters: dict, current_state: dict) -> dict:
-        """새로운 TV 상태 계산"""
-        new_state = current_state.copy()
-        
-        if action == "volume_up":
-            new_state["volume"] = min(current_state["volume"] + 5, current_state["max_volume"])
-        elif action == "volume_down":
-            new_state["volume"] = max(current_state["volume"] - 5, 0)
-        elif action == "volume_set" and "volume_level" in parameters:
-            new_state["volume"] = min(max(parameters["volume_level"], 0), current_state["max_volume"])
-        elif action == "channel_set" and "channel" in parameters:
-            new_state["channel"] = max(parameters["channel"], 1)
-        elif action == "channel_up":
-            new_state["channel"] = current_state["channel"] + 1
-        elif action == "channel_down":
-            new_state["channel"] = max(current_state["channel"] - 1, 1)
-        elif action == "power_off":
-            new_state["power"] = "off"
-        elif action == "power_on":
-            new_state["power"] = "on"
-        
-        return new_state
+    def _extract_volume_level(self, text: str) -> int:
+        """볼륨 레벨 추출"""
+        import re
+        numbers = re.findall(r'\b(\d+)\b', text)
+        if numbers:
+            level = int(numbers[0])
+            return min(max(level, 0), 100)  # 0-100 범위 제한
+        return None
 
-    def _generate_fallback_response(self, action: str, parameters: dict, current_state: dict, new_state: dict) -> str:
-        """대체 응답 생성"""
-        if action == "volume_up":
-            return f"📺 TV 볼륨을 {current_state['volume']}에서 {new_state['volume']}으로 올렸습니다! 🔊"
-        elif action == "volume_down":
-            return f"📺 TV 볼륨을 {current_state['volume']}에서 {new_state['volume']}으로 내렸습니다! 🔉"
-        elif action == "volume_set":
-            return f"📺 TV 볼륨을 {new_state['volume']}으로 설정했습니다! 🔊"
-        elif action == "channel_set":
-            return f"📺 TV 채널을 {current_state['channel']}번에서 {new_state['channel']}번으로 변경했습니다! 📡"
-        elif action == "channel_up":
-            return f"📺 TV 채널을 {current_state['channel']}번에서 {new_state['channel']}번으로 올렸습니다! 📡"
-        elif action == "channel_down":
-            return f"📺 TV 채널을 {current_state['channel']}번에서 {new_state['channel']}번으로 내렸습니다! 📡"
-        elif action == "power_on":
-            return f"📺 TV를 켰습니다! 현재 {new_state['channel']}번 채널, 볼륨 {new_state['volume']}입니다. ⚡"
-        elif action == "power_off":
-            return f"📺 TV를 껐습니다! 좋은 시간 되세요. 💤"
-        elif action == "mute":
-            return f"📺 TV 음소거를 설정했습니다! 🔇"
-        else:
-            return f"📺 TV 제어 명령을 적용했습니다! 모든 설정이 완료되었습니다. ✅"
+    def _extract_channel_number(self, text: str) -> int:
+        """채널 번호 추출"""
+        import re
+        numbers = re.findall(r'\b(\d+)\b', text)
+        if numbers:
+            return int(numbers[0])
+        return None
+
+    def _extract_hdmi_number(self, text: str) -> int:
+        """HDMI 번호 추출"""
+        import re
+        hdmi_match = re.search(r'hdmi\s*(\d+)', text.lower())
+        if hdmi_match:
+            return int(hdmi_match.group(1))
+        return 1  # 기본값
+
+    async def _execute_tv_control(self, action_info: dict, original_text: str) -> str:
+        """TV 제어 실행 (시뮬레이션)"""
+        action_type = action_info["action_type"]
+        parameters = action_info.get("parameters", {})
+        
+        try:
+            # LLM을 사용한 자연스러운 응답 생성 시도
+            response = await self._generate_tv_response(action_type, parameters, original_text)
+            return response
+            
+        except Exception as e:
+            print(f"❌ LLM TV 응답 생성 실패: {e}")
+            # 백업 응답
+            return self._generate_fallback_tv_response(action_type, parameters)
+
+    async def _generate_tv_response(self, action_type: str, parameters: dict, original_text: str) -> str:
+        """LLM을 사용한 자연스러운 TV 제어 응답 생성"""
+        try:
+            prompt_data = self.prompt_loader.load_prompt("tv_agent", "tv_control")
+            
+            # 시뮬레이션된 현재 TV 상태
+            current_channel = 1
+            current_volume = 20
+            
+            formatted_prompt = prompt_data["user_prompt_template"].format(
+                original_request=original_text,
+                action=action_type,
+                parameters=json.dumps(parameters, ensure_ascii=False),
+                current_channel=current_channel,
+                current_volume=current_volume
+            )
+            
+            response = await self.llm_client.chat_completion(
+                system_prompt=prompt_data["system_prompt"],
+                user_prompt=formatted_prompt,
+                max_tokens=300
+            )
+            
+            # JSON 응답 파싱 시도
+            try:
+                response_clean = response.strip()
+                if response_clean.startswith('```json'):
+                    response_clean = response_clean[7:]
+                if response_clean.endswith('```'):
+                    response_clean = response_clean[:-3]
+                response_clean = response_clean.strip()
+                
+                parsed_response = json.loads(response_clean)
+                return parsed_response.get("response", response_clean)
+                
+            except json.JSONDecodeError:
+                print(f"⚠️ JSON 파싱 실패, 원본 응답 사용: {response}")
+                return response.strip()
+            
+        except Exception as e:
+            print(f"❌ LLM TV 응답 생성 실패: {e}")
+            raise
+
+    def _generate_fallback_tv_response(self, action_type: str, parameters: dict) -> str:
+        """백업 TV 제어 응답 생성"""
+        
+        responses = {
+            "power_on": "📺 TV 전원을 켰습니다.",
+            "power_off": "📺 TV 전원을 껐습니다.",
+            "volume_up": f"🔊 볼륨을 올렸습니다{(' (' + str(parameters.get('level', '기본')) + ' 수준으로)') if parameters.get('level') else ''}.",
+            "volume_down": f"🔉 볼륨을 내렸습니다{(' (' + str(parameters.get('level', '기본')) + ' 수준으로)') if parameters.get('level') else ''}.",
+            "volume_control": "🔊 볼륨을 조절했습니다.",
+            "channel_change": f"📺 채널을 변경했습니다{(' (' + str(parameters.get('channel', '')) + '번으로)') if parameters.get('channel') else ''}.",
+            "channel_up": "📺 다음 채널로 변경했습니다.",
+            "channel_down": "📺 이전 채널로 변경했습니다.",
+            "input_change": f"📺 입력을 변경했습니다{(' (' + str(parameters.get('input', '')) + '으로)') if parameters.get('input') else ''}.",
+            "mute_toggle": "🔇 음소거를 전환했습니다.",
+            "unknown": "📺 TV 제어 명령을 처리했습니다."
+        }
+        
+        return responses.get(action_type, responses["unknown"])
 
     async def _send_response(self, context: RequestContext, queue: EventQueue, text: str):
         """응답 전송"""
-        print(f"📤 TV 응답 전송: '{text[:50]}...'")
+        print(f"📤 응답 전송: '{text}'")
         
         try:
             response_message = Message(
@@ -294,14 +290,61 @@ class TVAgentExecutor(AgentExecutor):
             )
             
             await queue.enqueue_event(response_message)
-            print("✅ TV 응답 전송 완료")
+            print("✅ 응답 전송 완료")
             
         except Exception as e:
-            print(f"❌ TV 응답 전송 오류: {e}")
+            print(f"❌ 응답 전송 중 오류: {e}")
 
     async def cancel(self, context: RequestContext) -> None:
         """실행 취소"""
-        print("🛑 TV Agent 취소")
+        print("🛑 Cancel 호출됨")
+
+
+async def register_to_main_agent(agent_card: dict, main_agent_url: str = "http://localhost:18000") -> bool:
+    """Main Agent Registry에 HTTP API를 통해 등록 (재시도 메커니즘 포함)"""
+    print(f"📝 Main Agent Registry에 TV Agent 등록 중...")
+    
+    max_retries = 5
+    retry_delay = 2  # 초
+    
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{main_agent_url}/api/registry/register",
+                    headers={"Content-Type": "application/json"},
+                    json=agent_card
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get("success"):
+                        print("✅ TV Agent Registry 등록 완료")
+                        return True
+                    else:
+                        print(f"❌ TV Agent Registry 등록 실패: {result.get('message', 'Unknown error')}")
+                        return False
+                else:
+                    print(f"⚠️ 등록 시도 {attempt + 1}/{max_retries} 실패 (HTTP {response.status_code})")
+                    if attempt < max_retries - 1:
+                        print(f"   {retry_delay}초 후 재시도...")
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    else:
+                        print(f"❌ TV Agent Registry 등록 최종 실패")
+                        return False
+                        
+        except Exception as e:
+            print(f"⚠️ 등록 시도 {attempt + 1}/{max_retries} 오류: {e}")
+            if attempt < max_retries - 1:
+                print(f"   {retry_delay}초 후 재시도...")
+                await asyncio.sleep(retry_delay)
+                continue
+            else:
+                print(f"❌ TV Agent Registry 등록 최종 실패: {e}")
+                return False
+    
+    return False
 
 
 def create_tv_agent():
@@ -309,26 +352,29 @@ def create_tv_agent():
     print("🏗️ TV Agent 생성...")
     
     agent_card = AgentCard(
-        id="tv-agent",
         name="TV Agent",
-        description="TV 제어 에이전트",
+        description="TV 제어 전담 에이전트 - A2A 프로토콜 지원",
         version="1.0.0",
         url="http://localhost:18002",
-        capabilities={},
+        capabilities={
+            "streaming": False,
+            "pushNotifications": False,
+            "stateTransitionHistory": False
+        },
         defaultInputModes=["text"],
         defaultOutputModes=["text"],
         skills=[
             AgentSkill(
                 id="tv_control",
-                name="tv_control",
-                description="TV 전원, 채널, 볼륨 제어",
-                tags=["tv", "control", "power", "volume"]
+                name="TV Control",
+                description="TV 전원, 볼륨, 채널, 입력 소스 제어",
+                tags=["tv", "control", "power", "volume", "channel", "remote"]
             ),
             AgentSkill(
-                id="channel_management",
-                name="channel_management",
-                description="채널 변경 및 관리",
-                tags=["tv", "channel", "management"]
+                id="tv_settings",
+                name="TV Settings",
+                description="TV 설정 변경 및 관리",
+                tags=["tv", "settings", "configuration", "preference"]
             )
         ]
     )
@@ -346,5 +392,10 @@ def create_tv_agent():
     
     app = app_builder.build()
     print("✅ TV Agent 생성 완료")
+    
+    # 서버 시작 이벤트에 등록 함수 추가
+    @app.on_event("startup")
+    async def startup_event():
+        await register_to_main_agent(agent_card.model_dump())
     
     return app

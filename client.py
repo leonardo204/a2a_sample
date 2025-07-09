@@ -198,13 +198,14 @@ class A2AClient:
             self.console.print("1. 📋 모든 Agent Card 보기")
             self.console.print("2. 🌤️  날씨 문의 테스트 (→ Weather Agent)")
             self.console.print("3. 📺 TV 제어 테스트 (→ TV Agent)")
-            self.console.print("4. 💬 일반 대화 테스트 (Main Agent)")
-            self.console.print("5. ✏️  직접 메시지 입력")
-            self.console.print("6. 🔧 Raw 응답 보기 ON/OFF")
-            self.console.print("7. 🌐 다른 Agent에 직접 연결")
+            self.console.print("4. 🌈 복합 도메인 테스트 (Weather + TV 조합)")
+            self.console.print("5. 💬 일반 대화 테스트 (Main Agent)")
+            self.console.print("6. ✏️  직접 메시지 입력")
+            self.console.print("7. 🔧 Raw 응답 보기 ON/OFF")
+            self.console.print("8. 🌐 다른 Agent에 직접 연결")
             self.console.print("0. 🚪 종료")
             
-            choice = self.console.input("\n[cyan]선택 (0-7): [/cyan]").strip()
+            choice = self.console.input("\n[cyan]선택 (0-8): [/cyan]").strip()
             
             if choice == "0":
                 self.console.print("[yellow]👋 안녕히 가세요![/yellow]")
@@ -216,12 +217,14 @@ class A2AClient:
             elif choice == "3":
                 await self.test_tv_control()
             elif choice == "4":
-                await self.test_general_chat()
+                await self.test_multi_domain()
             elif choice == "5":
-                await self.custom_message()
+                await self.test_general_chat()
             elif choice == "6":
-                self.toggle_raw_mode()
+                await self.custom_message()
             elif choice == "7":
+                self.toggle_raw_mode()
+            elif choice == "8":
                 await self.direct_agent_connection()
             else:
                 self.console.print("[red]잘못된 선택입니다.[/red]")
@@ -289,6 +292,65 @@ class A2AClient:
             
             if i < len(tv_commands):
                 self.console.input("\n[dim]다음 테스트를 위해 Enter를 눌러주세요...[/dim]")
+    
+    async def test_multi_domain(self):
+        """복합 도메인 테스트 (Weather + TV 조합)"""
+        multi_domain_queries = [
+            "오늘같은 날씨에 어울리는 채널로 변경해줘",
+            "날씨에 맞는 볼륨으로 조절해줘", 
+            "오늘 날씨에 따라 적절한 방송으로 해줘",
+            "날씨 보고 TV 설정 바꿔줘",
+            "비 오는 날에 어울리는 음량으로 해줘",
+            "맑은 날씨에 알맞은 채널을 추천해줘",
+            "오늘 기온에 따라 볼륨 조절해줘"
+        ]
+        
+        self.console.print("\n[bold]🌈 복합 도메인 테스트 (Weather + TV)[/bold]")
+        self.console.print("[dim]이 테스트는 Main Agent의 오케스트레이션 기능을 확인합니다.[/dim]")
+        self.console.print("[dim]Weather Agent와 TV Agent의 응답을 종합하여 통합된 응답을 생성합니다.[/dim]\n")
+        
+        for i, query in enumerate(multi_domain_queries, 1):
+            self.console.print(f"\n[bold cyan]{i}. {query}[/bold cyan]")
+            self.console.print("[dim]→ 예상 처리: Weather Agent + TV Agent → Main Agent 오케스트레이션[/dim]")
+            
+            response = await self.send_message(query, getattr(self, 'show_raw', False))
+            if response:
+                self.display_response(response)
+                
+                # 복합 응답 분석 정보 표시
+                self.console.print("\n[bold]📊 복합 처리 분석:[/bold]")
+                text = self.extract_response_text(response)
+                
+                analysis_table = Table(title="복합 도메인 응답 분석")
+                analysis_table.add_column("구분", style="cyan", width=15)
+                analysis_table.add_column("내용", style="white")
+                
+                # 간단한 키워드 분석
+                has_weather_info = any(keyword in text for keyword in ["날씨", "기온", "맑", "비", "℃", "°C"])
+                has_tv_info = any(keyword in text for keyword in ["TV", "티비", "볼륨", "채널", "방송"])
+                has_integration = any(keyword in text for keyword in ["종합", "조합", "통합", "추천", "제안"])
+                
+                analysis_table.add_row("날씨 정보 포함", "✅ 포함됨" if has_weather_info else "❌ 없음")
+                analysis_table.add_row("TV 제어 포함", "✅ 포함됨" if has_tv_info else "❌ 없음") 
+                analysis_table.add_row("통합 응답", "✅ 오케스트레이션" if has_integration else "📝 단순 조합")
+                
+                response_type = "🎯 완전한 복합 응답" if (has_weather_info and has_tv_info and has_integration) else \
+                               "⚠️ 부분적 복합 응답" if (has_weather_info and has_tv_info) else \
+                               "❌ 단일 도메인 응답"
+                analysis_table.add_row("응답 품질", response_type)
+                
+                self.console.print(analysis_table)
+            
+            if i < len(multi_domain_queries):
+                self.console.input("\n[dim]다음 테스트를 위해 Enter를 눌러주세요...[/dim]")
+        
+        # 테스트 완료 후 종합 평가
+        self.console.print("\n[bold green]🎉 복합 도메인 테스트 완료![/bold green]")
+        self.console.print("[bold]💡 복합 도메인 테스트 포인트:[/bold]")
+        self.console.print("• 날씨 정보와 TV 제어가 모두 포함되었는지 확인")
+        self.console.print("• Main Agent가 두 에이전트의 응답을 자연스럽게 통합했는지 확인")
+        self.console.print("• 사용자 의도에 맞는 개인화된 제안이 포함되었는지 확인")
+        self.console.print("• LLM 기반 오케스트레이션이 작동하는지 확인")
     
     async def test_general_chat(self):
         """일반 대화 테스트"""

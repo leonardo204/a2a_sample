@@ -1,21 +1,35 @@
 system_prompt: |
   당신은 사용자의 입력에서 엔티티를 추출하는 전문가입니다.
-  의도별로 필요한 엔티티를 정확히 추출해주세요.
+  요청 유형과 관련 도메인에 따라 필요한 엔티티를 정확히 추출해주세요.
+  multi_domain 요청의 경우 모든 관련 도메인의 엔티티를 추출하세요.
 
 user_prompt_template: |
   사용자 입력: "{user_input}"
-  분류된 의도: "{intent}"
+  요청 유형: "{request_type}"
+  관련 도메인: {domains}
   
-  위 입력에서 다음 엔티티들을 추출해주세요:
+  위 입력에서 도메인별 엔티티들을 추출해주세요:
   
-  [날씨 관련 엔티티]
+  [날씨 관련 엔티티 - weather 도메인]
   - location: 위치 정보 (서울, 부산, 대구 등)
   - time: 시간 정보 (오늘, 내일, 이번주 등)
+  - weather_context: 날씨 맥락 (어울리는, 맞는, 적절한 등)
   
-  [TV 제어 관련 엔티티]
+  [TV 제어 관련 엔티티 - tv_control 도메인]
   - action: 동작 (volume_up, volume_down, channel_control, power 등)
-  - channel: 채널 번호
+  - channel: 채널 번호 또는 채널 유형
   - volume_level: 볼륨 수준
+  - tv_context: TV 제어 맥락 (적절한, 어울리는 등)
+  
+  [일반 대화 관련 엔티티 - general_chat 도메인]
+  - chat_type: 대화 유형 (greeting, thanks, help, question 등)
+  - topic: 문의 주제 (기능, 사용법 등)
+  
+  [복합 요청 관련 엔티티 - multi_domain인 경우]
+  - connection_type: 연결 관계 (weather_based, contextual, preference_based 등)
+  - request_scope: 요청 범위 (all_domains, sequential, parallel 등)
+  
+  **중요**: multi_domain 요청인 경우, 관련된 모든 도메인의 엔티티를 추출하세요.
   
   JSON 형식으로 응답해주세요:
   {{
@@ -28,7 +42,8 @@ user_prompt_template: |
 
 examples:
   - input: "서울 내일 날씨 알려줘"
-    intent: "weather"
+    request_type: "single_domain"
+    domains: ["weather"]
     output: |
       {
         "entities": {
@@ -40,7 +55,8 @@ examples:
       }
   
   - input: "TV 볼륨 5 올려줘"
-    intent: "tv_control"
+    request_type: "single_domain"
+    domains: ["tv_control"]
     output: |
       {
         "entities": {
@@ -51,14 +67,46 @@ examples:
         "confidence": 0.95
       }
   
-  - input: "채널 7번으로 바꿔"
-    intent: "tv_control" 
+  - input: "안녕하세요"
+    request_type: "single_domain"
+    domains: ["general_chat"]
     output: |
       {
         "entities": {
-          "action": "channel_control",
-          "channel": "7"
+          "chat_type": "greeting"
         },
-        "extracted_values": ["채널", "7번", "바꿔"],
-        "confidence": 0.98
+        "extracted_values": ["안녕하세요"],
+        "confidence": 0.90
+      }
+  
+  - input: "오늘같은 날씨에 어울리는 채널로 변경해줘"
+    request_type: "multi_domain"
+    domains: ["weather", "tv_control"]
+    output: |
+      {
+        "entities": {
+          "time": "오늘",
+          "weather_context": "어울리는",
+          "action": "channel_control",
+          "connection_type": "weather_based",
+          "request_scope": "all_domains"
+        },
+        "extracted_values": ["오늘", "날씨", "어울리는", "채널", "변경"],
+        "confidence": 0.94
+      }
+  
+  - input: "날씨에 맞는 볼륨으로 조절해줘"
+    request_type: "multi_domain"
+    domains: ["weather", "tv_control"]
+    output: |
+      {
+        "entities": {
+          "weather_context": "맞는",
+          "action": "volume_control",
+          "tv_context": "조절",
+          "connection_type": "weather_based",
+          "request_scope": "all_domains"
+        },
+        "extracted_values": ["날씨", "맞는", "볼륨", "조절"],
+        "confidence": 0.91
       } 
