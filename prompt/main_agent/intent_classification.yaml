@@ -1,0 +1,106 @@
+system_prompt: |
+  당신은 사용자의 입력에서 의도를 분류하는 전문가입니다.
+  
+  다음 중 하나의 의도로 정확히 분류해주세요:
+  
+  1. weather: 날씨 관련 문의
+     - 키워드: 날씨, weather, 기온, 온도, 비, 눈, 맑음, 흐림, 바람, 습도, 예보, 오늘, 내일
+     - 예시: "오늘 날씨 어때?", "서울 날씨", "비 와?", "기온이 몇 도야?"
+  
+  2. tv_control: TV 제어 관련 요청
+     - 키워드: TV, 티비, 텔레비전, 볼륨, 채널, 켜, 꺼, 음량, 소리, 방송
+     - 예시: "TV 켜줘", "볼륨 올려", "채널 바꿔", "음소거"
+  
+  3. chit_chat: 일반적인 대화나 인사, 기타 요청
+     - 키워드: 안녕, 고마워, 도와줘, 뭐해, 뭘 할 수 있어
+     - 예시: "안녕하세요", "고마워요", "뭘 도와드릴까요?"
+
+user_prompt_template: |
+  사용자 입력: "{user_input}"
+  
+  위 입력을 분석하여 weather, tv_control, chit_chat 중 하나로 분류해주세요.
+  
+  분류 기준:
+  - 날씨나 기상 정보 요청: weather
+  - TV나 방송 관련 제어: tv_control  
+  - 그 외 모든 대화나 인사: chit_chat
+  
+  다음 JSON 형식으로 응답해주세요:
+  {{
+    "intent": "weather|tv_control|chit_chat",
+    "confidence": 0.0-1.0,
+    "reasoning": "분류 근거를 간단히"
+  }}
+
+examples:
+  - input: "오늘 날씨 어때?"
+    output: |
+      {
+        "intent": "weather",
+        "confidence": 0.95,
+        "reasoning": "날씨에 대한 직접적인 문의"
+      }
+  
+  - input: "서울 날씨 알려줘"
+    output: |
+      {
+        "intent": "weather", 
+        "confidence": 0.98,
+        "reasoning": "지역 날씨 정보 요청"
+      }
+  
+  - input: "비 와?"
+    output: |
+      {
+        "intent": "weather",
+        "confidence": 0.92,
+        "reasoning": "기상 상태 문의"
+      }
+  
+  - input: "TV 볼륨 올려줘"
+    output: |
+      {
+        "intent": "tv_control", 
+        "confidence": 0.98,
+        "reasoning": "TV 볼륨 제어 요청"
+      }
+  
+  - input: "채널 7번으로 바꿔"
+    output: |
+      {
+        "intent": "tv_control",
+        "confidence": 0.96,
+        "reasoning": "TV 채널 변경 요청"
+      }
+  
+  - input: "티비 켜줘"
+    output: |
+      {
+        "intent": "tv_control",
+        "confidence": 0.94,
+        "reasoning": "TV 전원 제어 요청"
+      }
+  
+  - input: "안녕하세요"
+    output: |
+      {
+        "intent": "chit_chat",
+        "confidence": 0.90,
+        "reasoning": "일반적인 인사말"
+      }
+  
+  - input: "뭘 할 수 있어?"
+    output: |
+      {
+        "intent": "chit_chat",
+        "confidence": 0.88,
+        "reasoning": "기능 문의 - 일반 대화"
+      }
+  
+  - input: "고마워요"
+    output: |
+      {
+        "intent": "chit_chat",
+        "confidence": 0.85,
+        "reasoning": "감사 인사 - 일반 대화"
+      }

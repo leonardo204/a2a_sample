@@ -1,0 +1,28 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# 공통 지침
+- context7 을 사용
+- 한국어로 응답
+- 기본으로 사용자가 요청한 사항에 대한 내용만 응답
+- 사용자가 별도로 요청할 때만 대안 제시
+- a2a-sample 폴더 안에서만 작업할 것
+- 실제 실행은 직접하지 않고, 요청하고 결과 응답을 받을 것
+
+# 프로젝트 요약
+- simple multi agent project
+- use a2a protocol with a2a-sdk library
+- refer @https://github.com/a2aproject/a2a-python
+- use python
+- use uv
+- main agent features
+  - orchestration
+  - response aggregator
+  - extract an intent / entity
+  - chit-chat answer: Handles all responses to questions that do not apply to service agents.
+- service agent #1 (weather)
+  - provice a weather service: Since this is a test, agent will only answer that it is sunny today.
+- service agent #2 (tv control)
+  - control tv device: Since it is a test, agent will only respond that I applied it unconditionally.

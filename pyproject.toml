@@ -1,0 +1,20 @@
+[project]
+name = "a2a-sample"
+version = "0.1.0"
+description = "Simple multi-agent project using a2a protocol"
+dependencies = [
+    "a2a-sdk[sqlite]>=0.2.0",
+    "uvicorn[standard]>=0.18.0",
+    "requests>=2.28.0",
+    "pydantic>=2.0.0",
+    "asyncio-mqtt>=0.13.0",
+    "uvloop>=0.17.0",
+    "loguru>=0.7.0",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
+    "rich>=14.0.0",
+]
+requires-python = ">=3.10"
+readme = "README.md"
+

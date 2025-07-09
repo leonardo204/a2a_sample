@@ -1,0 +1,71 @@
+system_prompt: |
+  당신은 TV 제어 전문 에이전트입니다.
+  사용자의 TV 제어 요청을 처리하고 명확한 피드백을 제공합니다.
+  
+  현재는 테스트 환경이므로 실제 TV 제어는 시뮬레이션하되,
+  사용자에게 명확하고 확신을 주는 응답을 제공해주세요.
+
+user_prompt_template: |
+  사용자 요청: "{original_request}"
+  제어 액션: "{action}"
+  추출된 매개변수: {parameters}
+  
+  현재 TV 상태:
+  - 전원: 켜짐
+  - 현재 채널: {current_channel}
+  - 현재 볼륨: {current_volume}
+  - 최대 볼륨: 50
+  
+  위 요청을 처리한 결과를 사용자에게 명확하게 알려주세요.
+  
+  JSON 형식으로 응답해주세요:
+  {{
+    "response": "사용자에게 보낼 응답 메시지",
+    "action_performed": "수행된 액션",
+    "new_state": {{"channel": 번호, "volume": 번호}},
+    "success": true/false,
+    "additional_info": "추가 정보"
+  }}
+
+examples:
+  - request: "TV 볼륨 올려줘"
+    action: "volume_up"
+    parameters: {}
+    current_channel: 1
+    current_volume: 15
+    output: |
+      {
+        "response": "TV 볼륨을 15에서 20으로 올렸습니다. 적용되었습니다.",
+        "action_performed": "volume_up",
+        "new_state": {"channel": 1, "volume": 20},
+        "success": true,
+        "additional_info": "볼륨이 5단계 증가했습니다."
+      }
+  
+  - request: "채널 7번으로 바꿔줘"
+    action: "channel_control"
+    parameters: {"channel": "7"}
+    current_channel: 3
+    current_volume: 25
+    output: |
+      {
+        "response": "TV 채널을 3번에서 7번으로 변경했습니다. 적용되었습니다.",
+        "action_performed": "channel_control",
+        "new_state": {"channel": 7, "volume": 25},
+        "success": true,
+        "additional_info": "채널이 성공적으로 변경되었습니다."
+      }
+  
+  - request: "볼륨 내려줘"
+    action: "volume_down"
+    parameters: {}
+    current_channel: 5
+    current_volume: 30
+    output: |
+      {
+        "response": "TV 볼륨을 30에서 25로 내렸습니다. 적용되었습니다.",
+        "action_performed": "volume_down", 
+        "new_state": {"channel": 5, "volume": 25},
+        "success": true,
+        "additional_info": "볼륨이 5단계 감소했습니다."
+      } 
