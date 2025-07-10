@@ -17,6 +17,7 @@ from a2a.types import (
 )
 from src.llm_client import LLMClient
 from src.prompt_loader import PromptLoader
+from src.extended_agent_card import ExtendedAgentSkill, EntityTypeInfo
 import logging
 
 logger = logging.getLogger(__name__)
@@ -102,13 +103,18 @@ class TVAgentExecutor(AgentExecutor):
         print(f"📺 TV 제어 요청 분석 중: '{user_text}'")
         
         try:
+            # 날씨 정보 포함 여부 확인
+            weather_info = self._extract_weather_context(user_text)
+            
             # TV 액션 분석
             action_info = self._analyze_tv_action(user_text)
             
             print(f"🎯 분석된 액션: {action_info}")
+            if weather_info:
+                print(f"🌤️ 날씨 맥락 정보: {weather_info}")
             
             # TV 제어 실행 (시뮬레이션)
-            result = await self._execute_tv_control(action_info, user_text)
+            result = await self._execute_tv_control(action_info, user_text, weather_info)
             
             return result
             
@@ -149,9 +155,9 @@ class TVAgentExecutor(AgentExecutor):
                 action_info["action_type"] = "volume_control"
         
         # 채널 제어
-        elif any(word in user_lower for word in ["채널", "channel"]):
-            if any(word in user_lower for word in ["바꿔", "변경", "돌려"]):
-                action_info["action_type"] = "channel_change"
+        elif any(word in user_lower for word in ["채널", "channel", "방송"]):
+            if any(word in user_lower for word in ["바꿔", "변경", "돌려", "적절한", "어울리는"]):
+                action_info["action_type"] = "channel_control"
                 channel_num = self._extract_channel_number(user_text)
                 if channel_num:
                     action_info["parameters"]["channel"] = channel_num
@@ -199,22 +205,51 @@ class TVAgentExecutor(AgentExecutor):
             return int(hdmi_match.group(1))
         return 1  # 기본값
 
-    async def _execute_tv_control(self, action_info: dict, original_text: str) -> str:
+    def _extract_weather_context(self, user_text: str) -> dict:
+        """사용자 요청에서 날씨 맥락 정보 추출"""
+        weather_info = {}
+        
+        # 날씨 정보 섹션 확인
+        if "[날씨 정보]" in user_text:
+            lines = user_text.split('\n')
+            in_weather_section = False
+            
+            for line in lines:
+                if "[날씨 정보]" in line:
+                    in_weather_section = True
+                    continue
+                elif in_weather_section and line.strip():
+                    # 날씨 정보 파싱
+                    if "날씨:" in line and "온도:" in line:
+                        parts = line.split(',')
+                        for part in parts:
+                            part = part.strip()
+                            if part.startswith("날씨:"):
+                                weather_info["condition"] = part.split(':')[1].strip()
+                            elif part.startswith("온도:"):
+                                weather_info["temperature"] = part.split(':')[1].strip()
+                        break
+                elif in_weather_section and line.strip() == "":
+                    break
+        
+        return weather_info
+
+    async def _execute_tv_control(self, action_info: dict, original_text: str, weather_info: dict = None) -> str:
         """TV 제어 실행 (시뮬레이션)"""
         action_type = action_info["action_type"]
         parameters = action_info.get("parameters", {})
         
         try:
             # LLM을 사용한 자연스러운 응답 생성 시도
-            response = await self._generate_tv_response(action_type, parameters, original_text)
+            response = await self._generate_tv_response(action_type, parameters, original_text, weather_info)
             return response
             
         except Exception as e:
             print(f"❌ LLM TV 응답 생성 실패: {e}")
             # 백업 응답
-            return self._generate_fallback_tv_response(action_type, parameters)
+            return self._generate_fallback_tv_response(action_type, parameters, weather_info)
 
-    async def _generate_tv_response(self, action_type: str, parameters: dict, original_text: str) -> str:
+    async def _generate_tv_response(self, action_type: str, parameters: dict, original_text: str, weather_info: dict = None) -> str:
         """LLM을 사용한 자연스러운 TV 제어 응답 생성"""
         try:
             prompt_data = self.prompt_loader.load_prompt("tv_agent", "tv_control")
@@ -223,8 +258,13 @@ class TVAgentExecutor(AgentExecutor):
             current_channel = 1
             current_volume = 20
             
+            # 날씨 정보가 있는 경우 프롬프트에 포함
+            weather_context = ""
+            if weather_info:
+                weather_context = f"\n\n[날씨 맥락 정보]\n날씨: {weather_info.get('condition', '정보 없음')}\n온도: {weather_info.get('temperature', '정보 없음')}\n\n위 날씨 정보를 고려하여 적절한 TV 제어 응답을 생성해주세요."
+            
             formatted_prompt = prompt_data["user_prompt_template"].format(
-                original_request=original_text,
+                original_request=original_text + weather_context,
                 action=action_type,
                 parameters=json.dumps(parameters, ensure_ascii=False),
                 current_channel=current_channel,
@@ -257,8 +297,18 @@ class TVAgentExecutor(AgentExecutor):
             print(f"❌ LLM TV 응답 생성 실패: {e}")
             raise
 
-    def _generate_fallback_tv_response(self, action_type: str, parameters: dict) -> str:
+    def _generate_fallback_tv_response(self, action_type: str, parameters: dict, weather_info: dict = None) -> str:
         """백업 TV 제어 응답 생성"""
+        
+        # 날씨 정보가 있는 경우 채널 변경 시 날씨에 맞는 응답
+        if weather_info and (action_type == "channel_change" or action_type == "channel_control"):
+            condition = weather_info.get("condition", "").strip()
+            if "맑" in condition:
+                return "📺 맑은 날씨에 어울리는 여행 프로그램 채널(7번)로 변경했습니다."
+            elif "흐" in condition or "비" in condition:
+                return "📺 흐린 날씨에 어울리는 영화 채널(5번)로 변경했습니다."
+            else:
+                return "📺 날씨에 어울리는 다큐멘터리 채널(9번)로 변경했습니다."
         
         responses = {
             "power_on": "📺 TV 전원을 켰습니다.",
@@ -365,16 +415,10 @@ def create_tv_agent():
         defaultOutputModes=["text"],
         skills=[
             AgentSkill(
-                id="tv_control",
-                name="TV Control",
-                description="TV 전원, 볼륨, 채널, 입력 소스 제어",
-                tags=["tv", "control", "power", "volume", "channel", "remote"]
-            ),
-            AgentSkill(
-                id="tv_settings",
-                name="TV Settings",
-                description="TV 설정 변경 및 관리",
-                tags=["tv", "settings", "configuration", "preference"]
+                id="tv",
+                name="TV Control Service",
+                description="TV 제어 및 설정 통합 서비스",
+                tags=["tv", "control", "settings", "power", "volume", "channel", "remote"]
             )
         ]
     )
@@ -396,6 +440,27 @@ def create_tv_agent():
     # 서버 시작 이벤트에 등록 함수 추가
     @app.on_event("startup")
     async def startup_event():
-        await register_to_main_agent(agent_card.model_dump())
+        # 확장된 정보를 포함하여 등록
+        extended_agent_card = agent_card.model_dump()
+        extended_agent_card["extended_skills"] = [
+            ExtendedAgentSkill(
+                id="tv",
+                name="TV Control Service",
+                description="TV 제어 및 설정 통합 서비스",
+                tags=["tv", "control", "settings", "power", "volume", "channel", "remote"],
+                domain_category="tv",
+                keywords=["TV", "티비", "텔레비전", "볼륨", "채널", "켜기", "끄기", "음량", "소리", "방송", "리모컨", "설정", "세팅"],
+                entity_types=[
+                    EntityTypeInfo("action", "TV 동작", ["volume_up", "volume_down", "channel_control", "power_on", "power_off"]),
+                    EntityTypeInfo("channel", "채널 번호", ["1", "2", "3", "7", "9", "11", "MBC", "SBS", "KBS", "tvN"]),
+                    EntityTypeInfo("volume_level", "볼륨 수준", ["5", "10", "15", "20", "최대", "최소", "크게", "작게"]),
+                    EntityTypeInfo("setting_type", "설정 타입", ["화질", "음질", "밝기", "명암", "색상"]),
+                    EntityTypeInfo("setting_value", "설정 값", ["높음", "중간", "낮음", "자동", "수동"])
+                ],
+                intent_patterns=["TV 제어", "리모컨 조작", "방송 조작", "TV 설정", "설정 변경", "tv control", "tv settings"],
+                connection_patterns=["어울리는", "맞는", "적절한", "조절", "기반으로", "맞춰서"]
+            ).to_dict()
+        ]
+        await register_to_main_agent(extended_agent_card)
     
     return app

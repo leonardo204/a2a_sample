@@ -22,6 +22,10 @@ from a2a.types import (
 from src.llm_client import LLMClient
 from src.prompt_loader import PromptLoader
 from src.query_analyzer import QueryAnalyzer, RequestAnalysis
+from src.dynamic_prompt_manager import DynamicPromptManager
+from src.dynamic_query_analyzer import DynamicQueryAnalyzer, RequestAnalysis as DynamicRequestAnalysis
+from src.extended_agent_card import ExtendedAgentSkill, EntityTypeInfo
+from src.context_manager import ContextManager
 import logging
 
 logger = logging.getLogger(__name__)
@@ -49,7 +53,13 @@ class AgentRegistry:
         print("📋 AgentRegistry 초기화 중...")
         self.agents: Dict[str, RegisteredAgent] = {}
         self.skill_to_agents: Dict[str, List[str]] = {}  # skill_id -> [agent_id]
+        self.prompt_manager = None  # 나중에 설정됨
         print("✅ AgentRegistry 초기화 완료")
+    
+    def set_prompt_manager(self, prompt_manager):
+        """프롬프트 매니저 설정 (초기화 이후에 설정)"""
+        self.prompt_manager = prompt_manager
+        print("🔗 AgentRegistry에 PromptManager 연결 완료")
 
     async def register_agent(self, agent_card: Dict[str, Any]) -> bool:
         """에이전트 등록"""
@@ -96,6 +106,13 @@ class AgentRegistry:
             
             # 스킬 인덱스 업데이트
             self._update_skill_index(agent_id, agent_card.get("skills", []))
+            
+            # 프롬프트 매니저에 에이전트 등록 알림
+            if self.prompt_manager:
+                try:
+                    await self.prompt_manager.on_agent_registered(agent_card)
+                except Exception as e:
+                    print(f"⚠️ 프롬프트 업데이트 실패: {e}")
             
             print(f"✅ 에이전트 등록 완료: {agent_id} ({registered_agent.name})")
             return True
@@ -204,12 +221,70 @@ class MainAgentExecutor(AgentExecutor):
         try:
             self.llm_client = LLMClient()
             self.prompt_loader = PromptLoader("prompt")
-            self.query_analyzer = QueryAnalyzer()
             self.agent_registry = AgentRegistry() # AgentRegistry 인스턴스 생성
-            print("✅ MainAgentExecutor 초기화 완료")
+            self.context_manager = ContextManager() # ContextManager 인스턴스 생성
+            
+            # 새로운 동적 프롬프트 시스템 초기화
+            self.prompt_manager = DynamicPromptManager(self.agent_registry)
+            self.query_analyzer = DynamicQueryAnalyzer(self.prompt_manager)
+            
+            # AgentRegistry에 PromptManager 연결
+            self.agent_registry.set_prompt_manager(self.prompt_manager)
+            
+            # 백업용 기존 분석기 (필요 시 사용)
+            self.legacy_query_analyzer = QueryAnalyzer()
+            
+            print("✅ MainAgentExecutor 초기화 완료 (동적 프롬프트 시스템 + ContextManager 적용)")
         except Exception as e:
             print(f"❌ 초기화 실패: {e}")
             raise
+    
+    def _clean_json_response(self, response: str) -> str:
+        """LLM 응답에서 JSON 부분만 추출"""
+        response = response.strip()
+        
+        # ```json 코드 블록 제거
+        if response.startswith("```json"):
+            response = response[7:]  # ```json 제거
+        if response.startswith("```"):
+            response = response[3:]  # ``` 제거
+        if response.endswith("```"):
+            response = response[:-3]  # ``` 제거
+        
+        return response.strip()
+    
+    async def _get_entities_from_last_analysis(self, user_query: str) -> List:
+        """Agent Card 기반 엔티티 정보 추출"""
+        try:
+            # Agent Card에서 등록된 엔티티 정보 기반으로 분석
+            entities = []
+            
+            # 등록된 Agent Card에서 엔티티 타입 가져오기
+            registered_agents = await self.agent_registry.get_all_agents()
+            
+            for agent in registered_agents:
+                extended_skills = agent.agent_card.get("extended_skills", [])
+                for skill in extended_skills:
+                    entity_types = skill.get("entity_types", [])
+                    for entity_type_info in entity_types:
+                        entity_name = entity_type_info.get("name", "")
+                        examples = entity_type_info.get("examples", [])
+                        
+                        # 예시 중 하나가 사용자 쿼리에 포함되어 있는지 확인
+                        for example in examples:
+                            if example in user_query:
+                                entities.append({
+                                    "entity_type": entity_name,
+                                    "value": example,
+                                    "confidence": 0.8
+                                })
+                                break  # 해당 엔티티 타입에서 첫 번째 매치만 사용
+            
+            return entities
+            
+        except Exception as e:
+            print(f"❌ Agent Card 기반 엔티티 정보 추출 실패: {e}")
+            return []
 
     async def execute(self, context: RequestContext, queue: EventQueue) -> None:
         """메시지 실행 처리"""
@@ -218,6 +293,7 @@ class MainAgentExecutor(AgentExecutor):
         print("🚀 MAIN AGENT 실행 시작")
         print("=" * 60)
         
+        session_id = None
         try:
             # 1. 사용자 메시지 추출
             user_text = await self._extract_user_message(context)
@@ -229,14 +305,17 @@ class MainAgentExecutor(AgentExecutor):
             
             print(f"✅ 추출된 메시지: '{user_text}'")
             
-            # 2. 쿼리 분석 (Intent/Entity 추출)
+            # 2. 컨텍스트 세션 생성
+            session_id = self.context_manager.create_session(user_text)
+            
+            # 3. 쿼리 분석 (Intent/Entity 추출)
             analysis = await self.query_analyzer.analyze_query(user_text)
             print(f"🧠 분석 결과: {analysis}")
             
-            # 3. 요청 처리 및 응답
-            response_text = await self._process_analyzed_request(user_text, analysis)
+            # 4. 요청 처리 및 응답 (세션 ID 전달)
+            response_text = await self._process_analyzed_request(user_text, analysis, session_id)
             
-            # 4. 응답 전송
+            # 5. 응답 전송
             await self._send_response(context, queue, response_text)
             
             print("✅ 처리 완료!")
@@ -244,6 +323,11 @@ class MainAgentExecutor(AgentExecutor):
         except Exception as e:
             print(f"❌ 오류 발생: {e}")
             await self._send_response(context, queue, f"처리 중 오류가 발생했습니다: {str(e)}")
+        finally:
+            # 세션 정리 (선택사항 - 짧은 세션의 경우)
+            if session_id:
+                # 단일 요청이므로 즉시 정리 (복합 요청은 유지할 수도 있음)
+                self.context_manager.cleanup_session(session_id)
 
     async def _extract_user_message(self, context: RequestContext) -> str:
         """사용자 메시지 추출"""
@@ -313,23 +397,23 @@ class MainAgentExecutor(AgentExecutor):
             print(traceback.format_exc())
             return ""
 
-    async def _process_analyzed_request(self, user_text: str, analysis: RequestAnalysis) -> str:
+    async def _process_analyzed_request(self, user_text: str, analysis: RequestAnalysis, session_id: str) -> str:
         """분석된 요청 처리"""
         print(f"🎯 요청 처리: request_type={analysis.request_type}, domains={analysis.domains}, requires_multiple={analysis.requires_multiple_agents}")
         
         # 1. 복합 도메인 요청 처리
         if analysis.requires_multiple_agents:
-            return await self._handle_multi_domain_request(user_text, analysis)
+            return await self._handle_multi_domain_request(user_text, analysis, session_id)
         
         # 2. 단일 도메인 요청 처리
         elif analysis.agent_skills_needed:
-            return await self._handle_single_domain_request(user_text, analysis)
+            return await self._handle_single_domain_request(user_text, analysis, session_id)
         
         # 3. 메인 에이전트에서 직접 처리
         else:
             return await self._handle_direct_request(user_text, analysis)
 
-    async def _handle_multi_domain_request(self, user_text: str, analysis: RequestAnalysis) -> str:
+    async def _handle_multi_domain_request(self, user_text: str, analysis: RequestAnalysis, session_id: str) -> str:
         """복합 도메인 요청 처리 (Response Aggregator)"""
         print("🔄 복합 도메인 요청 처리 중...")
         
@@ -344,43 +428,21 @@ class MainAgentExecutor(AgentExecutor):
                 print("💬 orchestration만 필요하므로 Main Agent에서 직접 처리")
                 return await self._handle_direct_request(user_text, analysis)
             
-            # 필요한 스킬별로 에이전트 발견
-            agents_by_skill = await self.agent_registry.discover_agents_by_skills(agent_skills_needed)
+            # Dependency 감지 및 실행 순서 결정
+            execution_plan = await self._analyze_execution_dependencies(user_text, analysis, agent_skills_needed)
             
-            responses = {}
-            tasks = []
-            
-            # 각 스킬에 대해 병렬로 요청 처리
-            for skill_id, agents in agents_by_skill.items():
-                if agents:
-                    # 첫 번째로 발견된 에이전트 사용 (향후 로드 밸런싱 고려 가능)
-                    selected_agent = agents[0]
-                    print(f"🎯 {skill_id} -> {selected_agent.name} ({selected_agent.url})")
-                    
-                    task = self._call_agent(selected_agent, user_text, skill_id)
-                    tasks.append((skill_id, task))
-                else:
-                    print(f"⚠️ '{skill_id}' 스킬을 가진 에이전트를 찾을 수 없음")
-            
-            # 모든 에이전트 응답 대기
-            if tasks:
-                for skill_id, task in tasks:
-                    try:
-                        response = await task
-                        responses[skill_id] = response
-                        print(f"✅ {skill_id} 응답 완료")
-                    except Exception as e:
-                        print(f"❌ {skill_id} 응답 실패: {e}")
-                        responses[skill_id] = f"{skill_id} 처리 중 오류가 발생했습니다."
-            
-            # 응답 집약 및 조합
-            return await self._aggregate_multi_domain_responses(user_text, analysis, responses)
+            if execution_plan["is_sequential"]:
+                # 순차 실행
+                return await self._execute_sequential_agents(user_text, analysis, execution_plan, session_id)
+            else:
+                # 병렬 실행 (기존 로직)
+                return await self._execute_parallel_agents(user_text, analysis, agent_skills_needed, session_id)
             
         except Exception as e:
             print(f"❌ 복합 도메인 요청 처리 실패: {e}")
             return f"복합 요청 처리 중 오류가 발생했습니다: {str(e)}"
 
-    async def _handle_single_domain_request(self, user_text: str, analysis: RequestAnalysis) -> str:
+    async def _handle_single_domain_request(self, user_text: str, analysis: RequestAnalysis, session_id: str) -> str:
         """단일 도메인 요청 처리"""
         print("🎯 단일 도메인 요청 처리 중...")
         
@@ -403,20 +465,300 @@ class MainAgentExecutor(AgentExecutor):
             print(f"🎯 선택된 에이전트: {selected_agent.name} ({selected_agent.url})")
             
             response = await self._call_agent(selected_agent, user_text, skill_id)
+            
+            # 에이전트 응답을 컨텍스트에 저장
+            self.context_manager.store_agent_response(session_id, skill_id, response)
+            
             return response
             
         except Exception as e:
             print(f"❌ 단일 도메인 요청 처리 실패: {e}")
             return f"요청 처리 중 오류가 발생했습니다: {str(e)}"
 
+    async def _analyze_execution_dependencies(self, user_text: str, analysis: RequestAnalysis, agent_skills_needed: List[str]) -> Dict[str, Any]:
+        """실행 dependency 분석 및 순서 결정 (Agent Card 기반)"""
+        print("🔍 Dependency 분석 중...")
+        
+        # Entity 기반 dependency 감지
+        connection_type = None
+        coordination_type = None
+        
+        for entity in analysis.entities:
+            if entity.entity_type == "connection_type":
+                connection_type = entity.value
+            elif entity.entity_type == "coordination_type":
+                coordination_type = entity.value
+        
+        print(f"🔗 Connection Type: {connection_type}")
+        print(f"🎯 Coordination Type: {coordination_type}")
+        
+        # Agent Card 기반 dependency 분석
+        dependency_info = await self._analyze_agent_dependencies(agent_skills_needed, connection_type, coordination_type)
+        
+        return {
+            "is_sequential": dependency_info["is_sequential"],
+            "execution_order": dependency_info["execution_order"],
+            "connection_type": connection_type,
+            "coordination_type": coordination_type,
+            "dependency_reasoning": dependency_info["reasoning"]
+        }
+
+    async def _analyze_agent_dependencies(self, agent_skills_needed: List[str], connection_type: str, coordination_type: str) -> Dict[str, Any]:
+        """LLM 기반 Agent dependency 분석"""
+        print("🔍 LLM 기반 Agent dependency 분석 중...")
+        
+        # 등록된 Agent들의 확장 정보 가져오기
+        registered_agents = await self.agent_registry.get_all_agents()
+        
+        # 스킬별 Agent 정보 매핑
+        skill_to_agent_info = {}
+        for agent in registered_agents:
+            extended_skills = agent.agent_card.get("extended_skills", [])
+            for skill_data in extended_skills:
+                skill_id = skill_data.get("id")
+                if skill_id in agent_skills_needed:
+                    skill_to_agent_info[skill_id] = {
+                        "agent_name": agent.name,
+                        "domain_category": skill_data.get("domain_category"),
+                        "connection_patterns": skill_data.get("connection_patterns", []),
+                        "skill_data": skill_data
+                    }
+        
+        print(f"📋 발견된 스킬-Agent 매핑: {list(skill_to_agent_info.keys())}")
+        
+        # LLM 기반 의존성 분석
+        try:
+            # 분석용 정보 포맷팅
+            agents_info = []
+            for skill_id, agent_info in skill_to_agent_info.items():
+                agent_name = agent_info.get("agent_name", "Unknown")
+                domain_category = agent_info.get("domain_category", "")
+                connection_patterns = agent_info.get("connection_patterns", [])
+                
+                agent_text = f"- {skill_id}: {agent_name}"
+                if domain_category:
+                    agent_text += f" (도메인: {domain_category})"
+                if connection_patterns:
+                    agent_text += f" (연결패턴: {', '.join(connection_patterns)})"
+                
+                agents_info.append(agent_text)
+            
+            system_prompt = """당신은 멀티 에이전트 시스템의 의존성 분석 전문가입니다.
+
+에이전트 간의 실행 순서와 의존성을 분석해주세요.
+
+분석 기준:
+1. coordination_type이 "conditional"인 경우 순차 실행 필요
+2. connection_type이 있고 관련 connection_patterns와 매칭되는 경우 순차 실행 필요  
+3. 정보 제공 에이전트와 제어 에이전트가 함께 있는 경우 순차 실행 필요
+4. 단일 에이전트이거나 독립적인 에이전트들은 병렬 실행 가능
+
+JSON 형식으로 응답해주세요:
+{
+  "is_sequential": boolean,
+  "execution_order": ["skill1", "skill2", ...],
+  "reasoning": "분석 근거"
+}"""
+            
+            user_prompt = f"""관련 에이전트/스킬:
+{chr(10).join(agents_info)}
+
+coordination_type: {coordination_type}
+connection_type: {connection_type}
+
+위 정보를 바탕으로 에이전트 간 의존성을 분석해주세요."""
+            
+            response = await self.llm_client.chat_completion(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=300
+            )
+            
+            cleaned_response = self._clean_json_response(response)
+            result = json.loads(cleaned_response)
+            
+            is_sequential = result.get("is_sequential", False)
+            execution_order = result.get("execution_order", agent_skills_needed)
+            reasoning = result.get("reasoning", "LLM 기반 분석")
+            
+            print(f"📋 LLM 기반 Dependency 분석 결과: {reasoning}")
+            
+            return {
+                "is_sequential": is_sequential,
+                "execution_order": execution_order,
+                "reasoning": reasoning
+            }
+            
+        except Exception as e:
+            print(f"❌ LLM 기반 의존성 분석 실패: {e}")
+            # 백업: 기본 병렬 실행
+            return {
+                "is_sequential": False,
+                "execution_order": agent_skills_needed,
+                "reasoning": "분석 실패로 인한 병렬 실행"
+            }
+    
+    async def _determine_execution_order_via_llm(self, agent_skills_needed: List[str], skill_to_agent_info: Dict[str, Any]) -> List[str]:
+        """LLM 기반 실행 순서 결정"""
+        print("🔗 LLM 기반 실행 순서 결정 중...")
+        
+        try:
+            # 스킬 정보 포맷팅
+            skills_info = []
+            for skill_id in agent_skills_needed:
+                agent_info = skill_to_agent_info.get(skill_id, {})
+                agent_name = agent_info.get("agent_name", "Unknown")
+                domain_category = agent_info.get("domain_category", "")
+                
+                skill_text = f"- {skill_id}: {agent_name}"
+                if domain_category:
+                    skill_text += f" (도메인: {domain_category})"
+                
+                skills_info.append(skill_text)
+            
+            system_prompt = """당신은 멀티 에이전트 시스템의 실행 순서 결정 전문가입니다.
+
+에이전트들의 실행 순서를 결정해주세요.
+
+순서 결정 기준:
+1. 정보 제공 에이전트는 제어 에이전트보다 먼저 실행
+2. 데이터 수집 에이전트는 데이터 활용 에이전트보다 먼저 실행
+3. 독립적인 에이전트들은 순서 상관없음
+4. 종속성이 있는 에이전트들은 의존성 순서대로 실행
+
+JSON 형식으로 응답해주세요:
+{
+  "execution_order": ["skill1", "skill2", ...],
+  "reasoning": "순서 결정 근거"
+}"""
+            
+            user_prompt = f"""실행할 스킬/에이전트:
+{chr(10).join(skills_info)}
+
+위 에이전트들의 최적 실행 순서를 결정해주세요."""
+            
+            response = await self.llm_client.chat_completion(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=200
+            )
+            
+            cleaned_response = self._clean_json_response(response)
+            result = json.loads(cleaned_response)
+            
+            execution_order = result.get("execution_order", agent_skills_needed)
+            reasoning = result.get("reasoning", "LLM 기반 순서 결정")
+            
+            print(f"📋 LLM 기반 실행 순서: {' → '.join(execution_order)} ({reasoning})")
+            
+            return execution_order
+            
+        except Exception as e:
+            print(f"❌ LLM 기반 실행 순서 결정 실패: {e}")
+            # 백업: 원래 순서 유지
+            return agent_skills_needed
+
+    async def _execute_sequential_agents(self, user_text: str, analysis: RequestAnalysis, execution_plan: Dict[str, Any], session_id: str) -> str:
+        """순차 실행 로직"""
+        print("🔄 순차 실행 시작...")
+        
+        execution_order = execution_plan["execution_order"]
+        connection_type = execution_plan.get("connection_type", "")
+        
+        agents_by_skill = await self.agent_registry.discover_agents_by_skills(execution_order)
+        responses = {}
+        
+        # 순차적으로 각 에이전트 실행
+        for i, skill_id in enumerate(execution_order):
+            agents = agents_by_skill.get(skill_id, [])
+            
+            if not agents:
+                print(f"⚠️ '{skill_id}' 스킬을 가진 에이전트를 찾을 수 없음")
+                responses[skill_id] = f"{skill_id} 처리 중 오류가 발생했습니다."
+                continue
+            
+            selected_agent = agents[0]
+            print(f"🎯 순차 실행 {i+1}/{len(execution_order)}: {skill_id} -> {selected_agent.name}")
+            
+            # ContextManager를 사용한 맥락 정보 포함 요청 생성
+            if i > 0:  # 첫 번째 에이전트가 아닌 경우 컨텍스트 포함
+                enhanced_request = await self.context_manager.create_contextual_request(
+                    session_id, user_text, skill_id, connection_type
+                )
+                response = await self._call_agent(selected_agent, enhanced_request, skill_id)
+            else:
+                response = await self._call_agent(selected_agent, user_text, skill_id)
+            
+            responses[skill_id] = response
+            
+            # ContextManager에 에이전트 응답 저장 및 맥락 정보 추출
+            self.context_manager.store_agent_response(session_id, skill_id, response, i)
+            
+            # 첫 번째 에이전트 응답에서 맥락 정보 추출
+            if i == 0:
+                extracted_info = await self.context_manager.extract_contextual_info(
+                    session_id, response, skill_id, self.agent_registry
+                )
+                print(f"💾 첫 번째 에이전트 맥락 정보 추출: {skill_id} -> {extracted_info}")
+            
+            print(f"✅ {skill_id} 순차 실행 완료")
+        
+        # 응답 집약
+        return await self._aggregate_multi_domain_responses(user_text, analysis, responses)
+
+    async def _execute_parallel_agents(self, user_text: str, analysis: RequestAnalysis, agent_skills_needed: List[str], session_id: str) -> str:
+        """병렬 실행 로직 (기존 로직)"""
+        print("🔄 병렬 실행 시작...")
+        
+        # 필요한 스킬별로 에이전트 발견
+        agents_by_skill = await self.agent_registry.discover_agents_by_skills(agent_skills_needed)
+        
+        responses = {}
+        tasks = []
+        
+        # 각 스킬에 대해 병렬로 요청 처리
+        for skill_id, agents in agents_by_skill.items():
+            if agents:
+                # 첫 번째로 발견된 에이전트 사용 (향후 로드 밸런싱 고려 가능)
+                selected_agent = agents[0]
+                print(f"🎯 병렬 실행: {skill_id} -> {selected_agent.name} ({selected_agent.url})")
+                
+                task = self._call_agent(selected_agent, user_text, skill_id)
+                tasks.append((skill_id, task))
+            else:
+                print(f"⚠️ '{skill_id}' 스킬을 가진 에이전트를 찾을 수 없음")
+        
+        # 모든 에이전트 응답 대기
+        if tasks:
+            for skill_id, task in tasks:
+                try:
+                    response = await task
+                    responses[skill_id] = response
+                    
+                    # ContextManager에 에이전트 응답 저장
+                    self.context_manager.store_agent_response(session_id, skill_id, response)
+                    
+                    print(f"✅ {skill_id} 병렬 실행 완료")
+                except Exception as e:
+                    print(f"❌ {skill_id} 응답 실패: {e}")
+                    responses[skill_id] = f"{skill_id} 처리 중 오류가 발생했습니다."
+        
+        # 응답 집약 및 조합
+        return await self._aggregate_multi_domain_responses(user_text, analysis, responses)
+
+
+
     async def _handle_direct_request(self, user_text: str, analysis: RequestAnalysis) -> str:
         """메인 에이전트에서 직접 처리"""
         print("💬 메인 에이전트에서 직접 처리...")
         
-        # 도메인 기반 처리
-        primary_domain = analysis.domains[0] if analysis.domains else "general_chat"
+        # Agent Card 기반 도메인 처리
+        primary_domain = analysis.domains[0] if analysis.domains else "unknown"
         
-        if primary_domain == "general_chat":
+        # Agent Card에서 대화형 도메인 확인
+        is_chat_domain = await self._is_chat_domain(primary_domain)
+        
+        if is_chat_domain:
             # 채팅 타입 엔티티 확인
             chat_type = None
             for entity in analysis.entities:
@@ -431,9 +773,34 @@ class MainAgentExecutor(AgentExecutor):
             elif chat_type == "help":
                 return await self._generate_help_response()
             else:
-                return f"안녕하세요! 저는 다양한 서비스 에이전트들과 협력하여 업무를 처리하는 오케스트레이터입니다. 현재 날씨 정보 제공과 TV 제어 기능을 지원합니다. (입력: '{user_text}')"
+                # Agent Card 기반 동적 기능 설명
+                return await self._generate_dynamic_introduction(user_text)
         else:
             return f"죄송합니다. '{user_text}' 요청을 처리할 수 있는 적절한 에이전트를 찾지 못했습니다."
+    
+    async def _is_chat_domain(self, domain: str) -> bool:
+        """Agent Card에서 대화형 도메인인지 확인"""
+        try:
+            # 등록된 Agent Card에서 대화형 도메인 확인
+            registered_agents = await self.agent_registry.get_all_agents()
+            
+            for agent in registered_agents:
+                extended_skills = agent.agent_card.get("extended_skills", [])
+                for skill in extended_skills:
+                    domain_category = skill.get("domain_category", "")
+                    
+                    # 도메인이 일치하고 chat 관련 카테고리인지 확인
+                    if domain_category == domain:
+                        if any(keyword in domain_category.lower() for keyword in ["chat", "conversation", "general"]):
+                            return True
+            
+            # 등록된 Agent가 없거나 unknown 도메인인 경우 대화형으로 처리
+            return domain == "unknown"
+            
+        except Exception as e:
+            print(f"❌ 대화형 도메인 확인 실패: {e}")
+            # 에러 발생 시 대화형으로 처리
+            return True
 
     async def _call_agent(self, agent: RegisteredAgent, user_text: str, skill_context: str = "") -> str:
         """에이전트 호출"""
@@ -502,138 +869,232 @@ class MainAgentExecutor(AgentExecutor):
             return f"{agent.name}와의 통신 중 오류가 발생했습니다."
 
     async def _aggregate_multi_domain_responses(self, user_text: str, analysis: RequestAnalysis, responses: Dict[str, str]) -> str:
-        """복합 도메인 응답 집약 및 조합"""
-        print("🔗 복합 도메인 응답 집약 중...")
+        """복합 도메인 응답 집약 및 조합 (domain agnostic)"""
+        print("\n" + "="*60)
+        print("🔗 MAIN AGENT 복합 응답 집약 시작")
+        print("="*60)
         
         try:
-            # 특별한 도메인 조합 처리
-            if "weather" in analysis.domains and "tv_control" in analysis.domains:
-                return await self._handle_weather_tv_combo(user_text, analysis, responses)
-            
-            # 일반적인 응답 조합
-            combined_response = "여러 도메인의 응답을 종합한 결과입니다:\n\n"
-            
-            for skill_id, response in responses.items():
-                skill_name = skill_id.replace("_", " ").title()
-                combined_response += f"🔸 {skill_name}: {response}\n"
-            
-            return combined_response.strip()
+            # LLM 기반 지능형 응답 집약 시도
+            return await self._intelligent_response_aggregation(user_text, analysis, responses)
             
         except Exception as e:
-            print(f"❌ 복합 도메인 응답 집약 실패: {e}")
-            return f"응답 집약 중 오류가 발생했습니다: {str(e)}"
+            print(f"❌ 지능형 응답 집약 실패: {e}")
+            # 백업: 구조화된 응답 조합
+            return await self._fallback_response_aggregation(responses)
 
-    async def _handle_weather_tv_combo(self, user_text: str, analysis: RequestAnalysis, responses: Dict[str, str]) -> str:
-        """날씨-TV 복합 요청 처리"""
-        print("🌤️📺 날씨-TV 복합 요청 처리...")
+    async def _intelligent_response_aggregation(self, user_text: str, analysis: RequestAnalysis, responses: Dict[str, str]) -> str:
+        """LLM 기반 지능형 응답 집약 (domain agnostic)"""
+        print("🧠 LLM 기반 지능형 응답 집약 중...")
         
-        weather_response = responses.get("weather_info", "날씨 정보를 가져올 수 없습니다.")
-        tv_response = responses.get("tv_control", "TV 제어 기능이 현재 사용할 수 없습니다.")
+        # 등록된 Agent 정보 가져오기
+        registered_agents = await self.agent_registry.get_all_agents()
         
-        # LLM을 사용해서 더 자연스러운 응답 생성
-        try:
-            # orchestration prompt 사용 또는 간단한 복합 응답 프롬프트 생성
-            system_prompt = """당신은 멀티 에이전트 시스템의 응답 집약기입니다.
-사용자의 복합 요청에 대해 날씨 에이전트와 TV 에이전트의 응답을 종합하여 
+        # 응답에 관련된 Agent 정보 수집
+        agent_info_list = []
+        for skill_id, response in responses.items():
+            agent_info = self._find_agent_info_by_skill(skill_id, registered_agents)
+            if agent_info:
+                agent_info_list.append(f"- {agent_info['name']}: {agent_info['description']}")
+        
+        # 시스템 프롬프트 생성
+        system_prompt = f"""당신은 멀티 에이전트 시스템의 응답 집약기입니다.
+사용자의 복합 요청에 대해 여러 에이전트의 응답을 종합하여 
 자연스럽고 유용한 통합 응답을 생성해주세요.
 
+참여 에이전트:
+{chr(10).join(agent_info_list)}
+
 응답 규칙:
-1. 날씨 정보와 TV 제어 결과를 자연스럽게 연결
+1. 각 에이전트의 응답을 논리적으로 연결
 2. 사용자의 의도를 고려한 개인화된 제안 포함
 3. 친근하고 도움이 되는 톤 사용
-4. 구체적이고 실용적인 정보 제공"""
+4. 구체적이고 실용적인 정보 제공
+5. 불필요한 중복 정보 제거"""
 
-            user_prompt = f"""사용자 요청: "{user_text}"
+        # 사용자 프롬프트 생성
+        responses_text = []
+        for skill_id, response in responses.items():
+            agent_info = self._find_agent_info_by_skill(skill_id, registered_agents)
+            agent_name = agent_info['name'] if agent_info else skill_id
+            responses_text.append(f"{agent_name}: {response}")
+        
+        user_prompt = f"""사용자 요청: "{user_text}"
 요청 유형: {analysis.request_type}
 관련 도메인: {analysis.domains}
 추출된 엔티티: {[f"{e.entity_type}: {e.value}" for e in analysis.entities]}
 
-날씨 에이전트 응답: {weather_response}
-TV 에이전트 응답: {tv_response}
+에이전트 응답:
+{chr(10).join(responses_text)}
 
 위 정보를 바탕으로 사용자의 복합 요청에 대한 통합된 응답을 생성해주세요."""
 
+        try:
             orchestrated_response = await self.llm_client.chat_completion(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 max_tokens=400
             )
             
-            print(f"✅ LLM 기반 복합 응답 생성 완료")
+            print(f"✅ LLM 기반 지능형 응답 집약 완료")
             return orchestrated_response
                 
         except Exception as e:
-            print(f"❌ LLM 기반 오케스트레이션 실패: {e}")
-            # 백업 응답: 구조화된 응답
-            pass
+            print(f"❌ LLM 기반 응답 집약 실패: {e}")
+            raise  # 백업 메서드에서 처리하도록 예외 전파
+    
+    def _find_agent_info_by_skill(self, skill_id: str, registered_agents: List) -> Optional[Dict[str, str]]:
+        """스킬 ID로 Agent 정보 찾기"""
+        for agent in registered_agents:
+            extended_skills = agent.agent_card.get("extended_skills", [])
+            for skill_data in extended_skills:
+                if skill_data.get("id") == skill_id:
+                    return {
+                        "name": agent.name,
+                        "description": agent.description
+                    }
+        return None
+    
+    async def _fallback_response_aggregation(self, responses: Dict[str, str]) -> str:
+        """백업 응답 집약 (구조화된 방식)"""
+        print("🔄 백업 응답 집약 사용...")
         
-        # 백업 응답: 키워드 기반 맞춤형 응답
-        user_lower = user_text.lower()
+        combined_response = "여러 에이전트의 응답을 종합한 결과입니다:\n\n"
         
-        # 채널 변경 관련 요청
-        if any(word in user_lower for word in ["채널", "channel", "방송"]):
-            return f"""🌤️ **오늘 날씨 정보**
-{weather_response}
-
-📺 **TV 채널 설정**
-{tv_response}
-
-💡 **추천 사항**
-현재 날씨가 좋으니 가족과 함께 즐길 수 있는 예능이나 여행 프로그램을 시청해보시는 것은 어떨까요?"""
-
-        # 볼륨 조절 관련 요청
-        elif any(word in user_lower for word in ["볼륨", "volume", "소리"]):
-            return f"""🌤️ **오늘 날씨 정보**
-{weather_response}
-
-📺 **TV 볼륨 설정**
-{tv_response}
-
-💡 **추천 사항**
-좋은 날씨에는 창문을 열어두시는 경우가 많으니, 외부 소음을 고려해서 적절한 볼륨으로 조절하시면 좋겠어요!"""
-
-        # 일반적인 복합 응답
-        else:
-            return f"""🌤️ **날씨 정보**
-{weather_response}
-
-📺 **TV 제어 결과**
-{tv_response}
-
-💡 **종합 제안**
-현재 날씨를 고려하여 TV 설정을 조정해드렸습니다. 편안한 시청 환경을 즐기세요!"""
+        for skill_id, response in responses.items():
+            skill_name = skill_id.replace("_", " ").title()
+            combined_response += f"🔸 **{skill_name}**: {response}\n\n"
+        
+        combined_response += "위 정보들을 종합하여 요청을 처리해드렸습니다."
+        
+        return combined_response.strip()
 
     async def _generate_help_response(self) -> str:
-        """도움말 응답 생성"""
+        """LLM 기반 도움말 응답 생성"""
         try:
             # 등록된 에이전트 정보 조회
             stats = await self.agent_registry.get_registry_stats()
             
-            help_text = "🤖 **멀티 에이전트 시스템 도움말**\n\n"
-            help_text += f"현재 {stats['healthy_agents']}개의 에이전트가 활성 상태입니다.\n\n"
-            help_text += "**사용 가능한 기능:**\n"
-            
-            # 스킬별 기능 설명
-            skills_info = {
-                "weather_info": "🌤️ 날씨 정보 조회 (예: '오늘 서울 날씨 어때?')",
-                "tv_control": "📺 TV 제어 (예: 'TV 볼륨 올려줘', '채널 바꿔줘')",
-                "orchestration": "🔗 복합 기능 (예: '오늘 날씨에 어울리는 볼륨으로 조절해줄래?')"
-            }
-            
-            for skill_id in stats['skills']:
-                if skill_id in skills_info:
-                    help_text += f"• {skills_info[skill_id]}\n"
-            
-            help_text += "\n**등록된 에이전트:**\n"
+            # 에이전트 정보 포맷팅
+            agents_info = []
             for agent_info in stats['agents']:
                 status = "🟢" if agent_info['is_healthy'] else "🔴"
-                help_text += f"{status} {agent_info['name']}: {', '.join(agent_info['skills'])}\n"
+                agents_info.append(f"{status} {agent_info['name']}: {', '.join(agent_info['skills'])}")
+            
+            # LLM 기반 도움말 생성
+            system_prompt = """당신은 멀티 에이전트 시스템의 도움말 생성 전문가입니다.
+
+사용자에게 시스템의 기능을 친근하고 유용하게 설명해주세요.
+
+도움말 구성:
+1. 시스템 소개 (멀티 에이전트 시스템임을 명시)
+2. 주요 기능 설명 (각 스킬의 용도와 예시)
+3. 등록된 에이전트 현황
+4. 사용 방법 가이드
+5. 친근하고 도움이 되는 톤 사용
+
+마크다운 형식으로 작성해주세요."""
+            
+            user_prompt = f"""시스템 현황:
+- 총 에이전트 수: {stats['total_agents']}개
+- 활성 에이전트 수: {stats['healthy_agents']}개
+- 사용 가능한 스킬: {', '.join(stats['skills'])}
+
+등록된 에이전트:
+{chr(10).join(agents_info)}
+
+위 정보를 바탕으로 사용자에게 유용한 도움말을 생성해주세요."""
+            
+            response = await self.llm_client.chat_completion(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=500
+            )
+            
+            return response
+            
+        except Exception as e:
+            print(f"❌ LLM 기반 도움말 생성 실패: {e}")
+            # 백업: Agent Card 기반 동적 백업 도움말
+            return await self._generate_dynamic_fallback_help()
+
+    async def _generate_dynamic_introduction(self, user_text: str) -> str:
+        """Agent Card 기반 동적 소개 생성"""
+        try:
+            # 등록된 에이전트 정보 조회
+            stats = await self.agent_registry.get_registry_stats()
+            
+            # 활성 에이전트들의 기능 정보 수집
+            available_functions = []
+            for agent_info in stats['agents']:
+                if agent_info['is_healthy']:
+                    agent_name = agent_info['name']
+                    skills = agent_info['skills']
+                    available_functions.append(f"• {agent_name}: {', '.join(skills)}")
+            
+            # LLM 기반 소개 생성
+            system_prompt = """당신은 멀티 에이전트 시스템의 소개 전문가입니다.
+
+사용자의 요청에 대해 친근하고 도움이 되는 소개를 생성해주세요.
+
+소개 구성:
+1. 멀티 에이전트 시스템 소개
+2. 현재 활성화된 에이전트들의 기능 설명
+3. 사용자 요청에 대한 이해 표현
+4. 다음 단계 안내
+
+친근하고 도움이 되는 톤으로 작성해주세요."""
+            
+            user_prompt = f"""사용자 요청: "{user_text}"
+
+현재 활성화된 기능:
+{chr(10).join(available_functions)}
+
+총 {stats['healthy_agents']}개의 에이전트가 활성 상태입니다.
+
+사용자에게 시스템을 소개하고 요청을 어떻게 처리할지 안내해주세요."""
+            
+            response = await self.llm_client.chat_completion(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=300
+            )
+            
+            return response
+            
+        except Exception as e:
+            print(f"❌ 동적 소개 생성 실패: {e}")
+            # 백업: 기본 소개
+            return f"안녕하세요! 저는 멀티 에이전트 시스템의 오케스트레이터입니다. 현재 {stats.get('healthy_agents', 0)}개의 에이전트가 활성 상태입니다. 무엇을 도와드릴까요?"
+    
+    async def _generate_dynamic_fallback_help(self) -> str:
+        """Agent Card 기반 동적 백업 도움말"""
+        try:
+            # 등록된 에이전트 정보 조회
+            stats = await self.agent_registry.get_registry_stats()
+            
+            # 활성 에이전트들의 기능 정보 수집
+            available_functions = []
+            for agent_info in stats['agents']:
+                if agent_info['is_healthy']:
+                    agent_name = agent_info['name']
+                    skills = agent_info['skills']
+                    available_functions.append(f"• {agent_name}: {', '.join(skills)}")
+            
+            if available_functions:
+                help_text = f"저는 다양한 에이전트들과 협력하는 오케스트레이터입니다.\n\n"
+                help_text += f"현재 활성화된 기능:\n"
+                help_text += "\n".join(available_functions)
+                help_text += f"\n\n총 {stats['healthy_agents']}개의 에이전트가 도움을 드릴 준비가 되어 있습니다."
+            else:
+                help_text = "저는 멀티 에이전트 시스템의 오케스트레이터입니다. 현재 등록된 에이전트를 확인 중입니다."
             
             return help_text
             
         except Exception as e:
-            print(f"❌ 도움말 생성 실패: {e}")
-            return "저는 다양한 에이전트들과 협력하는 오케스트레이터입니다. 날씨 정보, TV 제어 등의 기능을 제공합니다."
+            print(f"❌ 동적 백업 도움말 생성 실패: {e}")
+            # 최종 백업
+            return "저는 멀티 에이전트 시스템의 오케스트레이터입니다. 다양한 에이전트들과 협력하여 요청을 처리합니다."
 
     async def _send_response(self, context: RequestContext, queue: EventQueue, text: str):
         """응답 전송"""
@@ -773,7 +1234,53 @@ def create_main_agent():
         """Main Agent 자기 자신을 registry에 등록"""
         try:
             registry = executor.agent_registry
-            await registry.register_agent(agent_card.model_dump())
+            # 확장된 정보를 포함하여 등록
+            extended_agent_card = agent_card.model_dump()
+            extended_agent_card["extended_skills"] = [
+                ExtendedAgentSkill(
+                    id="orchestration",
+                    name="Orchestration",
+                    description="사용자 요청을 분석하고 적절한 에이전트로 라우팅하며 복합 응답을 집약",
+                    tags=["orchestration", "routing", "aggregation", "coordination"],
+                    domain_category="orchestration",
+                    keywords=["조율", "라우팅", "관리", "통합", "처리"],
+                    entity_types=[
+                        EntityTypeInfo("request_scope", "요청 범위", ["단일", "복합", "전체"]),
+                        EntityTypeInfo("coordination_type", "조율 타입", ["sequential", "parallel", "conditional"])
+                    ],
+                    intent_patterns=["복합 요청", "멀티 도메인", "orchestration"],
+                    connection_patterns=["어울리는", "맞는", "적절한", "따라", "기반으로", "맞춰서"]
+                ).to_dict(),
+                ExtendedAgentSkill(
+                    id="chit_chat",
+                    name="General Chat",
+                    description="일반적인 대화 및 시스템 정보 제공",
+                    tags=["chat", "conversation", "help"],
+                    domain_category="general_chat",
+                    keywords=["안녕", "고마워", "도움", "인사", "기능", "문의", "hello", "help"],
+                    entity_types=[
+                        EntityTypeInfo("chat_type", "대화 유형", ["greeting", "thanks", "help", "question"]),
+                        EntityTypeInfo("topic", "문의 주제", ["기능", "사용법", "도움말", "설명"])
+                    ],
+                    intent_patterns=["일반 대화", "인사", "도움 요청", "chit chat"],
+                    connection_patterns=[]
+                ).to_dict(),
+                ExtendedAgentSkill(
+                    id="agent_registry",
+                    name="Agent Registry",
+                    description="에이전트 등록 및 발견 서비스 제공",
+                    tags=["registry", "discovery", "management"],
+                    domain_category="management",
+                    keywords=["등록", "관리", "발견", "registry", "discovery"],
+                    entity_types=[
+                        EntityTypeInfo("agent_operation", "에이전트 작업", ["등록", "해제", "검색", "상태확인"]),
+                        EntityTypeInfo("agent_type", "에이전트 타입", ["service", "main", "helper"])
+                    ],
+                    intent_patterns=["에이전트 관리", "agent management", "registry"],
+                    connection_patterns=[]
+                ).to_dict()
+            ]
+            await registry.register_agent(extended_agent_card)
             print("✅ Main Agent 자체 등록 완료")
         except Exception as e:
             print(f"❌ Main Agent 자체 등록 실패: {e}")

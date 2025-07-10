@@ -17,6 +17,7 @@ from a2a.types import (
 )
 from src.llm_client import LLMClient
 from src.prompt_loader import PromptLoader
+from src.extended_agent_card import ExtendedAgentSkill, EntityTypeInfo
 import logging
 
 logger = logging.getLogger(__name__)
@@ -312,16 +313,10 @@ def create_weather_agent():
         defaultOutputModes=["text"],
         skills=[
             AgentSkill(
-                id="weather_info",
-                name="Weather Information",
-                description="지역별 현재 날씨 정보 제공",
-                tags=["weather", "info", "current", "temperature", "condition"]
-            ),
-            AgentSkill(
-                id="weather_forecast",
-                name="Weather Forecast", 
-                description="날씨 예보 정보 제공",
-                tags=["weather", "forecast", "prediction", "future"]
+                id="weather",
+                name="Weather Service",
+                description="날씨 정보 및 예보 제공 통합 서비스",
+                tags=["weather", "info", "forecast", "temperature", "condition"]
             )
         ]
     )
@@ -343,6 +338,24 @@ def create_weather_agent():
     # 서버 시작 이벤트에 등록 함수 추가
     @app.on_event("startup")
     async def startup_event():
-        await register_to_main_agent(agent_card.model_dump())
+        # 확장된 정보를 포함하여 등록
+        extended_agent_card = agent_card.model_dump()
+        extended_agent_card["extended_skills"] = [
+            ExtendedAgentSkill(
+                id="weather",
+                name="Weather Service",
+                description="날씨 정보 및 예보 제공 통합 서비스",
+                tags=["weather", "info", "forecast", "temperature", "condition"],
+                domain_category="weather",
+                keywords=["날씨", "weather", "기온", "온도", "비", "눈", "맑음", "흐림", "바람", "습도", "예보"],
+                entity_types=[
+                    EntityTypeInfo("location", "위치 정보", ["서울", "부산", "대구", "인천", "광주", "대전", "울산", "제주"]),
+                    EntityTypeInfo("time", "시간 정보", ["오늘", "내일", "이번주", "다음주", "지금", "현재", "모레", "주말", "평일"])
+                ],
+                intent_patterns=["날씨 문의", "기상 정보", "날씨 예보", "weather inquiry", "weather forecast"],
+                connection_patterns=["어울리는", "맞는", "적절한", "따라", "기반으로", "맞춰서"]
+            ).to_dict()
+        ]
+        await register_to_main_agent(extended_agent_card)
     
     return app

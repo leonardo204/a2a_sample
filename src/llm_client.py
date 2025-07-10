@@ -73,6 +73,35 @@ class AzureLLMClient:
             else:
                 raise ValueError("messages 또는 system_prompt/user_prompt 중 하나는 제공되어야 합니다.")
             
+            # === A2A 프로토콜 디버깅을 위한 상세 로깅 ===
+            logger.info("=" * 80)
+            logger.info("🤖 LLM API 호출 시작")
+            logger.info("=" * 80)
+            
+            # 요청 파라미터 로깅
+            logger.info(f"📋 요청 파라미터:")
+            logger.info(f"   - Model: {self.deployment_name}")
+            logger.info(f"   - Temperature: {temperature}")
+            logger.info(f"   - Max Tokens: {max_tokens}")
+            logger.info(f"   - Response Format: {response_format}")
+            logger.info(f"   - Messages Count: {len(final_messages)}")
+            
+            # 각 메시지별 상세 로깅
+            for i, message in enumerate(final_messages, 1):
+                role = message.get("role", "unknown")
+                content = message.get("content", "")
+                
+                logger.info(f"\n📝 Message {i} ({role.upper()}):")
+                logger.info("-" * 60)
+                
+                if len(content) > 500:
+                    # 긴 프롬프트는 앞뒤만 보여주고 중간은 생략
+                    logger.info(f"{content[:250]}\n\n... [중간 {len(content)-500}자 생략] ...\n\n{content[-250:]}")
+                else:
+                    logger.info(content)
+                
+                logger.info("-" * 60)
+            
             kwargs = {
                 "model": self.deployment_name,
                 "messages": final_messages,
@@ -84,15 +113,38 @@ class AzureLLMClient:
             if response_format:
                 kwargs["response_format"] = response_format
             
+            logger.info("\n🔄 LLM API 호출 중...")
             response = await self.client.chat.completions.create(**kwargs)
             
             content = response.choices[0].message.content
-            logger.debug(f"LLM 응답: {content}")
+            
+            # 응답 로깅
+            logger.info(f"\n✅ LLM 응답 수신:")
+            logger.info("-" * 60)
+            
+            if len(content) > 500:
+                logger.info(f"{content[:250]}\n\n... [중간 {len(content)-500}자 생략] ...\n\n{content[-250:]}")
+            else:
+                logger.info(content)
+            
+            logger.info("-" * 60)
+            
+            # 토큰 사용량 정보 (있다면)
+            if hasattr(response, 'usage') and response.usage:
+                logger.info(f"📊 토큰 사용량:")
+                logger.info(f"   - Prompt Tokens: {response.usage.prompt_tokens}")
+                logger.info(f"   - Completion Tokens: {response.usage.completion_tokens}")
+                logger.info(f"   - Total Tokens: {response.usage.total_tokens}")
+            
+            logger.info("=" * 80)
+            logger.info("🤖 LLM API 호출 완료")
+            logger.info("=" * 80 + "\n")
             
             return content.strip()
             
         except Exception as e:
-            logger.error(f"Azure OpenAI API 호출 실패: {e}")
+            logger.error(f"❌ Azure OpenAI API 호출 실패: {e}")
+            logger.error("=" * 80 + "\n")
             raise
     
     async def get_intent_classification(self, user_input: str, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
