@@ -54,8 +54,11 @@ class WeatherAgentExecutor(AgentExecutor):
             
             print(f"✅ 추출된 메시지: '{user_text}'")
             
-            # 2. 날씨 정보 처리
-            response_text = await self._process_weather_request(user_text)
+            # 2. Agent 컨텍스트 정보 추출
+            agent_contexts = self._extract_agent_contexts(user_text)
+            
+            # 3. 날씨 정보 처리
+            response_text = await self._process_weather_request(user_text, agent_contexts)
             
             # 3. 응답 전송
             await self._send_response(context, queue, response_text)
@@ -98,9 +101,81 @@ class WeatherAgentExecutor(AgentExecutor):
             print(f"❌ 메시지 추출 실패: {e}")
             return ""
 
-    async def _process_weather_request(self, user_text: str) -> str:
-        """날씨 요청 처리 - 단일 책임 원칙에 따라 날씨 정보만 제공"""
+    async def _process_weather_request(self, user_text: str, agent_contexts: list = None) -> str:
+        """날씨 요청 처리 - Agent Card 기반 동적 맥락 이해"""
         print(f"🌤️ 날씨 요청 분석 중: '{user_text}'")
+        
+        try:
+            # 다른 Agent 결과가 있으면 LLM으로 동적 해석
+            if agent_contexts:
+                print(f"🔄 다른 Agent 컨텍스트 감지: {len(agent_contexts)}개")
+                result = await self._process_weather_request_with_context(user_text, agent_contexts)
+            else:
+                # 단순 날씨 정보 요청
+                result = await self._process_simple_weather_request(user_text)
+            
+            return result
+            
+        except Exception as e:
+            print(f"❌ 날씨 요청 처리 실패: {e}")
+            return f"죄송합니다. 날씨 정보를 처리하는 중 오류가 발생했습니다."
+    
+    async def _process_weather_request_with_context(self, user_text: str, agent_contexts: list) -> str:
+        """LLM을 사용해 다른 Agent 결과를 동적으로 해석하여 날씨 정보 제공"""
+        print("🤖 LLM 기반 동적 컨텍스트 처리 시작")
+        
+        try:
+            # Agent 컨텍스트를 LLM 프롬프트로 구성
+            context_prompt = self._build_agent_context_prompt(agent_contexts)
+            
+            system_prompt = f"""당신은 날씨 정보 전문 에이전트입니다.
+
+사용자의 날씨 정보 요청과 함께 다른 에이전트들의 실행 결과가 제공됩니다.
+각 에이전트의 Agent Card 정보(skills, tags, entity_types)를 참고하여
+해당 결과가 날씨 정보 제공에 어떻게 활용될 수 있는지 동적으로 판단하세요.
+
+{context_prompt}
+
+응답은 반드시 JSON 형태로 제공해주세요:
+{{
+    "location_analysis": "위치 정보 분석",
+    "context_integration": "다른 Agent 결과를 어떻게 활용할지",
+    "weather_data": {{
+        "condition": "날씨 상태",
+        "temperature": "온도",
+        "humidity": "습도"
+    }},
+    "response": "사용자에게 전달할 최종 응답"
+}}"""
+
+            user_prompt = f"""사용자 요청: "{user_text}"
+
+위의 다른 에이전트 결과들을 참고하여 적절한 날씨 정보를 제공하고 자연스러운 응답을 생성해주세요."""
+
+            response = await self.llm_client.chat_completion(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=400,
+                response_format={"type": "json_object"}
+            )
+            
+            # JSON 응답 파싱
+            try:
+                import json
+                result = json.loads(response.strip())
+                return result.get("response", "날씨 정보를 제공했습니다.")
+            except json.JSONDecodeError:
+                print(f"❌ JSON 파싱 실패, 원본 응답 사용: {response}")
+                return response.strip()
+                
+        except Exception as e:
+            print(f"❌ LLM 컨텍스트 처리 실패: {e}")
+            # 백업으로 단순 처리
+            return await self._process_simple_weather_request(user_text)
+
+    async def _process_simple_weather_request(self, user_text: str) -> str:
+        """단순 날씨 정보 요청 처리"""
+        print("🌤️ 단순 날씨 정보 처리")
         
         try:
             # 지역 및 시간 정보 추출
@@ -111,17 +186,70 @@ class WeatherAgentExecutor(AgentExecutor):
             print(f"🕐 추출된 시간: {time_info}")
             
             # LLM을 사용한 자연스러운 날씨 응답 생성
-            try:
-                response = await self._generate_weather_response(user_text, location, time_info)
-                return response
-            except Exception as e:
-                print(f"❌ LLM 날씨 응답 생성 실패: {e}")
-                # 백업 응답 생성
-                return self._generate_fallback_weather_response(location, time_info)
+            response = await self._generate_weather_response(user_text, location, time_info)
+            return response
             
         except Exception as e:
-            print(f"❌ 날씨 요청 처리 실패: {e}")
-            return f"죄송합니다. 날씨 정보를 처리하는 중 오류가 발생했습니다."
+            print(f"❌ 단순 날씨 처리 실패: {e}")
+            return self._generate_fallback_weather_response(location, time_info)
+
+    def _build_agent_context_prompt(self, agent_contexts: list) -> str:
+        """Agent Card 정보를 LLM이 이해할 수 있는 프롬프트로 변환"""
+        
+        if not agent_contexts:
+            return "다른 에이전트 실행 결과가 없습니다."
+        
+        context_sections = []
+        
+        for context in agent_contexts:
+            agent_card = context.get("source_agent_card", {})
+            result = context.get("execution_result", {})
+            
+            section = f"""
+[{agent_card.get('name', 'Unknown Agent')} 정보]
+- Skills: {json.dumps(agent_card.get('skills', []), ensure_ascii=False)}
+- Extended Skills: {json.dumps(agent_card.get('extended_skills', []), ensure_ascii=False)}
+- 실행 결과: {json.dumps(result, ensure_ascii=False)}
+"""
+            context_sections.append(section)
+        
+        return "\n".join(context_sections)
+
+    def _extract_agent_contexts(self, user_text: str) -> list:
+        """메시지에서 Agent 컨텍스트 정보 추출"""
+        try:
+            # [AGENT_CONTEXT] 섹션이 있는지 확인
+            if "[AGENT_CONTEXT]" not in user_text:
+                return []
+            
+            # JSON 형태의 컨텍스트 정보 추출
+            lines = user_text.split('\n')
+            in_context_section = False
+            context_json = ""
+            
+            for line in lines:
+                if "[AGENT_CONTEXT]" in line:
+                    in_context_section = True
+                    continue
+                elif in_context_section and line.strip():
+                    if line.strip().startswith('[') or line.strip().startswith('{'):
+                        context_json += line.strip()
+                    elif context_json and (line.strip().endswith(']') or line.strip().endswith('}')):
+                        context_json += line.strip()
+                        break
+                    elif context_json:
+                        context_json += line.strip()
+                elif in_context_section and line.strip() == "":
+                    break
+            
+            if context_json:
+                import json
+                return json.loads(context_json)
+                
+        except Exception as e:
+            print(f"⚠️ Agent 컨텍스트 추출 실패: {e}")
+        
+        return []
 
     def _extract_location(self, user_text: str) -> str:
         """지역 정보 추출"""

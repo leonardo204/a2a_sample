@@ -12,9 +12,9 @@ system_prompt: '당신은 멀티 에이전트 시스템의 오케스트레이터
 
   다음 서비스 에이전트들이 사용 가능합니다:
 
-  - Weather Agent: 날씨 정보 제공 전담 에이전트 - A2A 프로토콜 지원 (Skills: Weather Service)
-
   - TV Agent: TV 제어 전담 에이전트 - A2A 프로토콜 지원 (Skills: TV Control Service)
+
+  - Weather Agent: 날씨 정보 제공 전담 에이전트 - A2A 프로토콜 지원 (Skills: Weather Service)
 
   '
 user_prompt_template: "사용자 입력: \"{user_input}\"\n분류된 의도: \"{intent}\"\n추출된 엔티티: {entities}\n\

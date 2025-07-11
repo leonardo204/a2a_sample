@@ -54,8 +54,11 @@ class TVAgentExecutor(AgentExecutor):
             
             print(f"✅ 추출된 메시지: '{user_text}'")
             
-            # 2. TV 제어 요청 처리
-            response_text = await self._process_tv_request(user_text)
+            # 2. Agent 컨텍스트 정보 추출
+            agent_contexts = self._extract_agent_contexts(user_text)
+            
+            # 3. TV 제어 요청 처리
+            response_text = await self._process_tv_request(user_text, agent_contexts)
             
             # 3. 응답 전송
             await self._send_response(context, queue, response_text)
@@ -98,29 +101,190 @@ class TVAgentExecutor(AgentExecutor):
             print(f"❌ 메시지 추출 실패: {e}")
             return ""
 
-    async def _process_tv_request(self, user_text: str) -> str:
-        """TV 제어 요청 처리 - 단일 책임 원칙에 따라 TV 제어만 수행"""
+    async def _process_tv_request(self, user_text: str, agent_contexts: list = None) -> str:
+        """TV 제어 요청 처리 - Agent Card 기반 동적 맥락 이해"""
         print(f"📺 TV 제어 요청 분석 중: '{user_text}'")
         
         try:
-            # 날씨 정보 포함 여부 확인
-            weather_info = self._extract_weather_context(user_text)
-            
-            # TV 액션 분석
-            action_info = self._analyze_tv_action(user_text)
-            
-            print(f"🎯 분석된 액션: {action_info}")
-            if weather_info:
-                print(f"🌤️ 날씨 맥락 정보: {weather_info}")
-            
-            # TV 제어 실행 (시뮬레이션)
-            result = await self._execute_tv_control(action_info, user_text, weather_info)
+            # 다른 Agent 결과가 있으면 LLM으로 동적 해석
+            if agent_contexts:
+                print(f"🔄 다른 Agent 컨텍스트 감지: {len(agent_contexts)}개")
+                result = await self._process_tv_request_with_context(user_text, agent_contexts)
+            else:
+                # 단순 TV 제어 요청
+                result = await self._process_simple_tv_request(user_text)
             
             return result
             
         except Exception as e:
             print(f"❌ TV 제어 요청 처리 실패: {e}")
             return f"죄송합니다. TV 제어 처리 중 오류가 발생했습니다."
+    
+    async def _process_tv_request_with_context(self, user_text: str, agent_contexts: list) -> str:
+        """LLM을 사용해 다른 Agent 결과를 동적으로 해석하여 TV 제어"""
+        print("🤖 LLM 기반 동적 컨텍스트 처리 시작")
+        
+        try:
+            # Agent 컨텍스트를 LLM 프롬프트로 구성
+            context_prompt = self._build_agent_context_prompt(agent_contexts)
+            
+            system_prompt = f"""당신은 TV 제어 전문 에이전트입니다.
+
+사용자의 TV 제어 요청과 함께 다른 에이전트들의 실행 결과가 제공됩니다.
+각 에이전트의 Agent Card 정보(skills, tags, entity_types)를 참고하여
+해당 결과가 TV 제어에 어떻게 활용될 수 있는지 동적으로 판단하세요.
+
+{context_prompt}
+
+응답은 반드시 JSON 형태로 제공해주세요:
+{{
+    "action_analysis": "수행할 TV 액션 분석",
+    "context_integration": "다른 Agent 결과를 어떻게 활용할지",
+    "response": "사용자에게 전달할 최종 응답"
+}}"""
+
+            user_prompt = f"""사용자 요청: "{user_text}"
+
+위의 다른 에이전트 결과들을 참고하여 적절한 TV 제어를 수행하고 자연스러운 응답을 생성해주세요."""
+
+            response = await self.llm_client.chat_completion(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=400,
+                response_format={"type": "json_object"}
+            )
+            
+            # JSON 응답 파싱
+            try:
+                import json
+                result = json.loads(response.strip())
+                return result.get("response", "TV 제어를 완료했습니다.")
+            except json.JSONDecodeError:
+                print(f"❌ JSON 파싱 실패, 원본 응답 사용: {response}")
+                return response.strip()
+                
+        except Exception as e:
+            print(f"❌ LLM 컨텍스트 처리 실패: {e}")
+            # 백업으로 단순 처리
+            return await self._process_simple_tv_request(user_text)
+
+    async def _process_simple_tv_request(self, user_text: str) -> str:
+        """단순 TV 제어 요청 처리"""
+        print("📺 단순 TV 제어 처리")
+        
+        try:
+            # TV 액션 분석
+            action_info = self._analyze_tv_action(user_text)
+            print(f"🎯 분석된 액션: {action_info}")
+            
+            # LLM을 사용한 자연스러운 응답 생성
+            response = await self._generate_simple_tv_response(action_info, user_text)
+            return response
+            
+        except Exception as e:
+            print(f"❌ 단순 TV 처리 실패: {e}")
+            return self._generate_fallback_tv_response(action_info.get("action_type", "unknown"), {})
+
+    def _build_agent_context_prompt(self, agent_contexts: list) -> str:
+        """Agent Card 정보를 LLM이 이해할 수 있는 프롬프트로 변환"""
+        
+        if not agent_contexts:
+            return "다른 에이전트 실행 결과가 없습니다."
+        
+        context_sections = []
+        
+        for context in agent_contexts:
+            agent_card = context.get("source_agent_card", {})
+            result = context.get("execution_result", {})
+            
+            section = f"""
+[{agent_card.get('name', 'Unknown Agent')} 정보]
+- Skills: {json.dumps(agent_card.get('skills', []), ensure_ascii=False)}
+- Extended Skills: {json.dumps(agent_card.get('extended_skills', []), ensure_ascii=False)}
+- 실행 결과: {json.dumps(result, ensure_ascii=False)}
+"""
+            context_sections.append(section)
+        
+        return "\n".join(context_sections)
+
+    def _extract_agent_contexts(self, user_text: str) -> list:
+        """메시지에서 Agent 컨텍스트 정보 추출"""
+        try:
+            # [AGENT_CONTEXT] 섹션이 있는지 확인
+            if "[AGENT_CONTEXT]" not in user_text:
+                return []
+            
+            # JSON 형태의 컨텍스트 정보 추출
+            lines = user_text.split('\n')
+            in_context_section = False
+            context_json = ""
+            
+            for line in lines:
+                if "[AGENT_CONTEXT]" in line:
+                    in_context_section = True
+                    continue
+                elif in_context_section and line.strip():
+                    if line.strip().startswith('[') or line.strip().startswith('{'):
+                        context_json += line.strip()
+                    elif context_json and (line.strip().endswith(']') or line.strip().endswith('}')):
+                        context_json += line.strip()
+                        break
+                    elif context_json:
+                        context_json += line.strip()
+                elif in_context_section and line.strip() == "":
+                    break
+            
+            if context_json:
+                import json
+                return json.loads(context_json)
+                
+        except Exception as e:
+            print(f"⚠️ Agent 컨텍스트 추출 실패: {e}")
+        
+        return []
+
+    async def _generate_simple_tv_response(self, action_info: dict, user_text: str) -> str:
+        """단순 TV 제어를 위한 LLM 응답 생성"""
+        try:
+            prompt_data = self.prompt_loader.load_prompt("tv_agent", "tv_control")
+            
+            # 시뮬레이션된 현재 TV 상태
+            current_channel = 1
+            current_volume = 20
+            
+            formatted_prompt = prompt_data["user_prompt_template"].format(
+                original_request=user_text,
+                action=action_info["action_type"],
+                parameters=json.dumps(action_info.get("parameters", {}), ensure_ascii=False),
+                current_channel=current_channel,
+                current_volume=current_volume
+            )
+            
+            response = await self.llm_client.chat_completion(
+                system_prompt=prompt_data["system_prompt"],
+                user_prompt=formatted_prompt,
+                max_tokens=300
+            )
+            
+            # JSON 응답 파싱 시도
+            try:
+                response_clean = response.strip()
+                if response_clean.startswith('```json'):
+                    response_clean = response_clean[7:]
+                if response_clean.endswith('```'):
+                    response_clean = response_clean[:-3]
+                response_clean = response_clean.strip()
+                
+                parsed_response = json.loads(response_clean)
+                return parsed_response.get("response", response_clean)
+                
+            except json.JSONDecodeError:
+                print(f"⚠️ JSON 파싱 실패, 원본 응답 사용: {response}")
+                return response.strip()
+            
+        except Exception as e:
+            print(f"❌ 단순 TV 응답 생성 실패: {e}")
+            return self._generate_fallback_tv_response(action_info["action_type"], action_info.get("parameters", {}))
 
     def _analyze_tv_action(self, user_text: str) -> dict:
         """TV 액션 분석"""
@@ -205,111 +369,12 @@ class TVAgentExecutor(AgentExecutor):
             return int(hdmi_match.group(1))
         return 1  # 기본값
 
-    def _extract_weather_context(self, user_text: str) -> dict:
-        """사용자 요청에서 날씨 맥락 정보 추출"""
-        weather_info = {}
-        
-        # 날씨 정보 섹션 확인
-        if "[날씨 정보]" in user_text:
-            lines = user_text.split('\n')
-            in_weather_section = False
-            
-            for line in lines:
-                if "[날씨 정보]" in line:
-                    in_weather_section = True
-                    continue
-                elif in_weather_section and line.strip():
-                    # 날씨 정보 파싱
-                    if "날씨:" in line and "온도:" in line:
-                        parts = line.split(',')
-                        for part in parts:
-                            part = part.strip()
-                            if part.startswith("날씨:"):
-                                weather_info["condition"] = part.split(':')[1].strip()
-                            elif part.startswith("온도:"):
-                                weather_info["temperature"] = part.split(':')[1].strip()
-                        break
-                elif in_weather_section and line.strip() == "":
-                    break
-        
-        return weather_info
 
-    async def _execute_tv_control(self, action_info: dict, original_text: str, weather_info: dict = None) -> str:
-        """TV 제어 실행 (시뮬레이션)"""
-        action_type = action_info["action_type"]
-        parameters = action_info.get("parameters", {})
-        
-        try:
-            # LLM을 사용한 자연스러운 응답 생성 시도
-            response = await self._generate_tv_response(action_type, parameters, original_text, weather_info)
-            return response
-            
-        except Exception as e:
-            print(f"❌ LLM TV 응답 생성 실패: {e}")
-            # 백업 응답
-            return self._generate_fallback_tv_response(action_type, parameters, weather_info)
 
-    async def _generate_tv_response(self, action_type: str, parameters: dict, original_text: str, weather_info: dict = None) -> str:
-        """LLM을 사용한 자연스러운 TV 제어 응답 생성"""
-        try:
-            prompt_data = self.prompt_loader.load_prompt("tv_agent", "tv_control")
-            
-            # 시뮬레이션된 현재 TV 상태
-            current_channel = 1
-            current_volume = 20
-            
-            # 날씨 정보가 있는 경우 프롬프트에 포함
-            weather_context = ""
-            if weather_info:
-                weather_context = f"\n\n[날씨 맥락 정보]\n날씨: {weather_info.get('condition', '정보 없음')}\n온도: {weather_info.get('temperature', '정보 없음')}\n\n위 날씨 정보를 고려하여 적절한 TV 제어 응답을 생성해주세요."
-            
-            formatted_prompt = prompt_data["user_prompt_template"].format(
-                original_request=original_text + weather_context,
-                action=action_type,
-                parameters=json.dumps(parameters, ensure_ascii=False),
-                current_channel=current_channel,
-                current_volume=current_volume
-            )
-            
-            response = await self.llm_client.chat_completion(
-                system_prompt=prompt_data["system_prompt"],
-                user_prompt=formatted_prompt,
-                max_tokens=300
-            )
-            
-            # JSON 응답 파싱 시도
-            try:
-                response_clean = response.strip()
-                if response_clean.startswith('```json'):
-                    response_clean = response_clean[7:]
-                if response_clean.endswith('```'):
-                    response_clean = response_clean[:-3]
-                response_clean = response_clean.strip()
-                
-                parsed_response = json.loads(response_clean)
-                return parsed_response.get("response", response_clean)
-                
-            except json.JSONDecodeError:
-                print(f"⚠️ JSON 파싱 실패, 원본 응답 사용: {response}")
-                return response.strip()
-            
-        except Exception as e:
-            print(f"❌ LLM TV 응답 생성 실패: {e}")
-            raise
 
-    def _generate_fallback_tv_response(self, action_type: str, parameters: dict, weather_info: dict = None) -> str:
-        """백업 TV 제어 응답 생성"""
-        
-        # 날씨 정보가 있는 경우 채널 변경 시 날씨에 맞는 응답
-        if weather_info and (action_type == "channel_change" or action_type == "channel_control"):
-            condition = weather_info.get("condition", "").strip()
-            if "맑" in condition:
-                return "📺 맑은 날씨에 어울리는 여행 프로그램 채널(7번)로 변경했습니다."
-            elif "흐" in condition or "비" in condition:
-                return "📺 흐린 날씨에 어울리는 영화 채널(5번)로 변경했습니다."
-            else:
-                return "📺 날씨에 어울리는 다큐멘터리 채널(9번)로 변경했습니다."
-        
+
+    def _generate_fallback_tv_response(self, action_type: str, parameters: dict) -> str:
+        """백업 TV 제어 응답 생성"""        
         responses = {
             "power_on": "📺 TV 전원을 켰습니다.",
             "power_off": "📺 TV 전원을 껐습니다.",

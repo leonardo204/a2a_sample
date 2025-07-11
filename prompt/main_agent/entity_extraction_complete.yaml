@@ -13,8 +13,8 @@ system_prompt: '당신은 사용자의 입력에서 엔티티를 추출하는 �
 user_prompt_template: "사용자 입력: \"{user_input}\"\n요청 유형: \"{request_type}\"\n관련 도메인:\
   \ {domains}\n\n위 입력에서 도메인별 엔티티들을 추출해주세요:\n- request_scope: 요청 범위\n- coordination_type:\
   \ 조율 타입\n- chat_type: 대화 유형\n- topic: 문의 주제\n- agent_operation: 에이전트 작업\n- agent_type:\
-  \ 에이전트 타입\n- location: 위치 정보\n- time: 시간 정보\n- action: TV 동작\n- channel: 채널 번호\n\
-  - volume_level: 볼륨 수준\n- setting_type: 설정 타입\n- setting_value: 설정 값\n- connection_type:\
-  \ 연결 관계 (기반으로, 따라, 조절, 맞춰서, 맞는)\n\nJSON 형식으로 응답해주세요:\n{{\n  \"entities\": {{\n \
-  \   \"key\": \"value\"\n  }},\n  \"extracted_values\": [\"추출된 값들\"],\n  \"confidence\"\
+  \ 에이전트 타입\n- action: TV 동작\n- channel: 채널 번호\n- volume_level: 볼륨 수준\n- setting_type:\
+  \ 설정 타입\n- setting_value: 설정 값\n- location: 위치 정보\n- time: 시간 정보\n- connection_type:\
+  \ 연결 관계 (기반으로, 맞춰서, 어울리는, 적절한, 따라)\n\nJSON 형식으로 응답해주세요:\n{{\n  \"entities\": {{\n\
+  \    \"key\": \"value\"\n  }},\n  \"extracted_values\": [\"추출된 값들\"],\n  \"confidence\"\
   : 0.0-1.0\n}}\n"
