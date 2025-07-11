@@ -21,9 +21,8 @@ from a2a.types import (
 )
 from src.llm_client import LLMClient
 from src.prompt_loader import PromptLoader
-from src.query_analyzer import QueryAnalyzer, RequestAnalysis
 from src.dynamic_prompt_manager import DynamicPromptManager
-from src.dynamic_query_analyzer import DynamicQueryAnalyzer, RequestAnalysis as DynamicRequestAnalysis
+from src.dynamic_query_analyzer import DynamicQueryAnalyzer, RequestAnalysis
 from src.extended_agent_card import ExtendedAgentSkill, EntityTypeInfo
 from src.context_manager import ContextManager
 import logging
@@ -224,15 +223,12 @@ class MainAgentExecutor(AgentExecutor):
             self.agent_registry = AgentRegistry() # AgentRegistry 인스턴스 생성
             self.context_manager = ContextManager() # ContextManager 인스턴스 생성
             
-            # 새로운 동적 프롬프트 시스템 초기화
+            # 동적 프롬프트 시스템 초기화 (skeleton → complete 방식)
             self.prompt_manager = DynamicPromptManager(self.agent_registry)
             self.query_analyzer = DynamicQueryAnalyzer(self.prompt_manager)
             
             # AgentRegistry에 PromptManager 연결
             self.agent_registry.set_prompt_manager(self.prompt_manager)
-            
-            # 백업용 기존 분석기 (필요 시 사용)
-            self.legacy_query_analyzer = QueryAnalyzer()
             
             print("✅ MainAgentExecutor 초기화 완료 (동적 프롬프트 시스템 + ContextManager 적용)")
         except Exception as e:
@@ -418,14 +414,15 @@ class MainAgentExecutor(AgentExecutor):
         print("🔄 복합 도메인 요청 처리 중...")
         
         try:
-            # orchestration 스킬은 Main Agent 자신이 처리하므로 제외
+            # Main Agent 자신이 처리하는 스킬들 제외
+            main_agent_skills = ["orchestration", "chit_chat", "agent_registry"]
             print(f"🔍 원래 필요 스킬: {analysis.agent_skills_needed}")
-            agent_skills_needed = [skill for skill in analysis.agent_skills_needed if skill != "orchestration"]
+            agent_skills_needed = [skill for skill in analysis.agent_skills_needed if skill not in main_agent_skills]
             print(f"🔍 에이전트 호출 대상 스킬: {agent_skills_needed}")
             
             if not agent_skills_needed:
-                # orchestration만 필요한 경우 직접 처리
-                print("💬 orchestration만 필요하므로 Main Agent에서 직접 처리")
+                # Main Agent 자신이 처리하는 스킬들만 필요한 경우 직접 처리
+                print("💬 Main Agent 자신이 처리하는 스킬들만 필요하므로 직접 처리")
                 return await self._handle_direct_request(user_text, analysis)
             
             # Dependency 감지 및 실행 순서 결정
@@ -447,11 +444,12 @@ class MainAgentExecutor(AgentExecutor):
         print("🎯 단일 도메인 요청 처리 중...")
         
         try:
-            # orchestration 스킬은 Main Agent 자신이 처리하므로 제외
-            agent_skills_needed = [skill for skill in analysis.agent_skills_needed if skill != "orchestration"]
+            # Main Agent 자신이 처리하는 스킬들 제외
+            main_agent_skills = ["orchestration", "chit_chat", "agent_registry"]
+            agent_skills_needed = [skill for skill in analysis.agent_skills_needed if skill not in main_agent_skills]
             
             if not agent_skills_needed:
-                # orchestration만 필요한 경우 직접 처리
+                # Main Agent 자신이 처리하는 스킬인 경우 직접 처리
                 return await self._handle_direct_request(user_text, analysis)
             
             skill_id = agent_skills_needed[0]  # 첫 번째 스킬 사용
@@ -1057,7 +1055,7 @@ JSON 형식으로 응답해주세요:
             response = await self.llm_client.chat_completion(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=300
+                max_tokens=3000
             )
             
             return response
